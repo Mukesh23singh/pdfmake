@@ -18,16 +18,20 @@ class IntegrationTestHelper {
 		docDefinition.attachments = docDefinition.attachments || {};
 		var fontDescriptors = {
 			Roboto: {
-				normal: 'tests/fonts/Roboto-Regular.ttf',
-				bold: 'tests/fonts/Roboto-Medium.ttf',
-				italics: 'tests/fonts/Roboto-Italic.ttf',
-				bolditalics: 'tests/fonts/Roboto-Italic.ttf'
+				normal: 'fonts/Roboto/Roboto-Regular.ttf',
+				bold: 'fonts/Roboto/Roboto-Medium.ttf',
+				italics: 'fonts/Roboto/Roboto-Italic.ttf',
+				bolditalics: 'fonts/Roboto/Roboto-MediumItalic.ttf'
 			}
 		};
 
 		var pageSize = { width: size[0], height: size[1], orientation: 'portrait' };
 
-		this.pdfDocument = new PDFDocument(fontDescriptors, docDefinition.images, docDefinition.attachments, { size: [pageSize.width, pageSize.height], compress: false });
+		if (docDefinition.pageOrientation === 'landscape') {
+			pageSize = { width: size[1], height: size[0], orientation: 'landscape' };
+		}
+
+		this.pdfDocument = new PDFDocument(fontDescriptors, docDefinition.images, docDefinition.patterns || {}, docDefinition.attachments, { size: [pageSize.width, pageSize.height], compress: false });
 		var builder = new LayoutBuilder(pageSize, { left: this.MARGINS.left, right: this.MARGINS.right, top: this.MARGINS.top, bottom: this.MARGINS.bottom }, new SVGMeasure());
 
 		return builder.layoutDocument(
@@ -37,7 +41,6 @@ class IntegrationTestHelper {
 			docDefinition.background,
 			docDefinition.header,
 			docDefinition.footer,
-			docDefinition.images,
 			docDefinition.watermark,
 			docDefinition.pageBreakBefore
 		);

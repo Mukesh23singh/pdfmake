@@ -1,22 +1,187 @@
 # Changelog
 
-## 0.3.0-beta.3 - 2022-10-09
+## Unreleased
 
-- Updated Roboto font (version 3.005)
-- Fixed calculating auto page height
-- Fixed TrueType Collection loading from URL
-- Fixed refetching fonts from URL
+- Reduced PDF size by deduplicating identical base64 and binary images
+- Invalid or missing images embedded in SVG now throw an error instead of being silently skipped
+- Replaced the unmaintained `svg-to-pdfkit` dependency and local patches with the maintained `@pdfmake/svg-to-pdfkit` fork
+- Fixed absolutely positioned content inside unbreakable blocks and table rows being shifted by the fragment's position
+- Fixed incorrect table borders caused by page breaks in long backgrounds
+- Fixed incorrect wrapping and missing absolutely positioned text inside unbreakable blocks and table rows
+- Fixed incorrect vertical alignment of table cells after layout is recalculated by `pageBreakBefore`
+- Fixed infinite layout loops and disappearing backgrounds when using `pageBreakBefore`
+- Fixed backgrounds of nested table cells not being moved with the content of table cells with `verticalAlignment` set to `middle` or `bottom`
 
-## 0.3.0-beta.2 - 2022-04-01
+## 0.3.14 - 2026-11-08
 
-- Attachments embedding
-- Support passing headers to request for loading font files and images via URL adresses
+- Changed URL resource caching: downloaded fonts, images, attachments and embedded files are now stored per document by default instead of being automatically shared across documents
 
-## 0.3.0-beta.1 - 2022-01-01
+	Addresses CVE-2026-119743 in server-side applications that let untrusted users specify resource URLs, such as image URLs in the document definition's `images` dictionary.
+- Added `pdfmake.setUrlResourceCaching(true | false)` to control caching of downloaded URL resources across documents (default: `false`). Per-URL `cache` values override this setting.
 
+	To restore the behavior of previous versions, call `pdfmake.setUrlResourceCaching(true)` before generating documents.
+
+	```js
+	pdfmake.setUrlResourceCaching(true);
+
+	pdfmake.createPdf({
+		content: [{ image: 'logo' }],
+		images: {
+			logo: {
+				url: 'https://example.com/logo.png',
+				cache: false // Override the default for new downloads.
+			}
+		}
+	});
+	```
+
+	These options control cache writes. Existing shared entries remain available regardless of `cache`. Shared entries are keyed by URL only, without request headers. `setUrlAccessPolicy()` applies to network downloads, not cache reads.
+- Added `pdfmake.clearUrlResourceCache()` to remove URL resource cache.
+- Added support for binary font definitions and image dictionary entries using `Buffer`, `Uint8Array` or `ArrayBuffer`
+- Update Roboto font (version 3.016)
+- Improved performance for large documents when using `pageBreakBefore`
+- Fixed reversed ordered lists starting at a too high number when they contain nested lists
+- Fixed canvas polylines being shifted and affecting column widths when layout is recalculated by `pageBreakBefore`
+- Fixed canvas polylines in repeated table headers shifting across pages due to shared points
+- Fixed infinite loops when using `pageBreakBefore` with headers or footers
+- Fixed oversized table borders after layout is recalculated by `pageBreakBefore`
+- Fixed incorrect node positions reported to `pageBreakBefore` after unbreakable blocks or table rows move to another page
+- Fixed extra spacing between inline fragments in justified text
+- Fixed repeated nested table headers appearing outside the parent table's borders and background fills on subsequent pages
+- Fixed list markers being misplaced on subsequent pages when using text backgrounds
+- Fixed invalid page height in temporary contexts used for unbreakable blocks and table rows
+- Fixed `background` of trimmed leading whitespace being drawn to the left of the text, into the page margin or outside the table cell
+- Fixed file attachment annotations disappearing inside unbreakable blocks and table rows
+- Fixed the first word of justified text being shifted right when the line starts with whitespace
+- Fixed svg-to-pdfkit - Fixed excessive memory usage and stack overflows caused by nested SVG `<use>` references by limiting expansion size and depth
+- Fixed SVG font loading from VFS and TrueType collections
+- Fixed SVG fonts bypassing `setLocalAccessPolicy`
+
+## 0.3.13 - 2026-10-25
+
+- Added horizontal table alignment via `tableAlignment`: `left` (default), `center`, or `right`
+- Fixed PDF stream errors not rejecting promises returned by `getBuffer()`, `getBase64()` and `getDataUrl()`
+- Fixed `getStream()` returning an already consumed stream; subsequent stream access now rejects
+- Fixed `write()` hanging or failing after `getBuffer()`, `getBase64()` or `getDataUrl()` by reusing buffered PDF data
+- Fixed attachments loaded from the virtual file system (including downloaded URL attachments) failing with "No src specified"
+- Fixed sections with automatic page height sharing the first section's height and clipping content in subsequent sections
+- Fixed vertical alignment of row-spanned table header cells when the table starts on a subsequent page
+- Fixed text decoration positioning and automatic thickness for mixed font sizes depending on the order of text fragments
+- Fixed adjacent text fragments with different `decorationThickness` values being rendered with the same decoration thickness
+- Fixed wavy text decoration clipping height incorrectly depending on the vertical position on the page
+- Fixed reversed paint order of table cell background fills in unbreakable blocks, which caused outer table fills to cover nested table fills
+- Fixed percentage table column widths using incorrect padding and border widths when mixed with `auto` or star-sized columns
+- Fixed `TypeError: Invalid base URL` when loading the browser build in React Native
+
+## 0.3.12 - 2026-10-17
+
+- **Reduced browser bundle size by over 20%**
+- Updated pdfkit to 0.20.2
+- Fixed `setLocalAccessPolicy` being bypassed for local images embedded in SVG
+
+## 0.3.11 - 2026-06-12
+
+- Updated pdfkit to 0.19.1 (fixed RGB JPEG embedded as DeviceGray, bug introduced in 0.19.0)
+
+## 0.3.10 - 2026-06-07
+
+- Updated pdfkit to 0.19.0
+
+## 0.3.9 - 2026-05-23
+
+- Fixed table rowSpan cell height in last column
+
+## 0.3.8 - 2026-05-06
+
+- Added server-side method `setLocalAccessPolicy()` for defining a custom access policy for local file
+
+	Example:
+	```js
+	pdfmake.setLocalAccessPolicy((path) => {
+		// check allowed local file path
+		return path.startsWith("fonts/");
+	});
+	```
+- Improved URL Access Policy (`setUrlAccessPolicy` method); URLs are now validated even before each redirection in Node.js and after final redirection in browser (browsers do not support validation before redirection)
+- Fixed extra blank page when using headerRows, dontBreakRows and cell pageBreak together
+- Fixed rendering of an invalid color name - previously it used the last valid color; now it defaults to black
+- Fixed dontBreakRows rowSpan ending offset across pages
+
+## 0.3.7 - 2026-03-17
+
+- Updated pdfkit to 0.18.0
+
+## 0.3.6 - 2026-03-10
+
+- Added `setUrlAccessPolicy()` for defining a custom access policy for external URLs before download
+	(addresses a potential server vulnerability **CVE-2026-26801**)
+
+	Example:
+	```js
+	pdfmake.setUrlAccessPolicy((url) => {
+		// check allowed domain
+		return url.startsWith("https://example.com/");
+	});
+	```
+	For details see [documentation](https://pdfmake.github.io/docs/0.3/getting-started/server-side/methods/#url-access-policy)
+- Added validation for image height and width values
+
+## 0.3.5 - 2026-02-22
+
+- Added `snakingColumns` property for columns to enable newspaper-like column flow
+- Added outlines / bookmarks for `text` node
+	- `outline` - set to `true` for add to bookmarks
+	- `outlineText` (optional) - set custom bookmark text, otherwise text from node
+	- `outlineExpanded` (optional) - set to `true` for expanded/opened bookmark
+	- `outlineParentId` (optional) - parent bookmark `id`
+- Added property `outlines` for ToC, which adds all items to outlines / bookmarks (any existing outline settings on texts are respected)
+
+## 0.3.4 - 2026-02-13
+
+- Added vertical alignment for table cells via `verticalAlignment` property, values: `top` (default), `middle`, `bottom`
+- Fixed margin inheritance when styles are extended multiple times
+
+## 0.3.3 - 2026-01-18
+
+- Added properties for ToC:
+	- `hideEmpty` - set to `true` if you can hide an empty ToC
+	- `sortBy` - `'page'` (default) or `'title'`
+	- `sortLocale` - custom locale to sort by property `sortBy`
+- Added property `decorationThickness` for `text` to set width of the decoration line
+- Added inherited/extends styles, use property `extends` in style with style name or array of string with style names
+- Fixed margin override with 0 value
+- Fixed margin override from multiple styles
+- Fixed text decoration for superscript and subscript
+- Fixed svg-to-pdfkit - TypeError: t.classList.contains is not a function
+
+## 0.3.2 - 2026-01-11
+
+- Fixed non-working `open()` and `print()` methods in browser
+- Added SVG validation: width and height must be specified (in SVG string/element or `svg` node)
+- Added support for image scaling with only `height` defined
+- Added custom `markerColor` for each item of `ul` and `ol`
+
+## 0.3.1 - 2026-01-07
+
+- Added auto page height for multiple pages (for `section` or after custom page break)
+- Added type validation for parameters in method `createPdf`
+- Added support `SVGElement` object for `svg` node (`SVGElement` object is available only in browser)
+- Updated svg-to-pdfkit library to the latest GitHub master commit
+- Fixed a bug in the write method where it did not wait for the file write operation to complete
+- Fixed SVG loading
+- Fixed rendering SVG without viewBox
+
+## 0.3.0 - 2026-01-01
+
+- Reverted to the original `pdfkit` package, moving away from `@foliojs-fork`
+- Drop support Internet Explorer 11 (Microsoft will not support from 2022)
+- Minimal supported version Node.js 20 LTS
 - Port code base to ES6+
 - Unify interface for node and browser **(breaking change)**
 - All methods return promise instead of using callback **(breaking change)**
 - Change including virtual font storage in client-side **(breaking change)**
 - Change parameters of `pageBreakBefore` function **(breaking change)**
-- Support for loading font files and images via URL adresses (https:// or http:// protocol) in Node.js (client and server side now)
+- Support for loading font files and images via URL addresses (https:// or http:// protocol) in Node.js (client and server side now)
+- Used fetch API for downloading fonts and images
+- Attachments embedding
+- Added `section` node

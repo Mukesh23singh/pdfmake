@@ -9,8 +9,8 @@ describe('DocumentContext', function () {
 	var pc;
 
 	beforeEach(function () {
-		pc = new DocumentContext.default({ width: 400, height: 800, orientation: 'portrait' }, { left: 40, right: 40, top: 60, bottom: 60 });
-		// pc.addPage();
+		pc = new DocumentContext.default();
+		pc.addPage({ width: 400, height: 800, orientation: 'portrait' }, { left: 40, right: 40, top: 60, bottom: 60 });
 	});
 
 	it('should set initial values based on pageSize and pageMargins', function () {
@@ -29,6 +29,78 @@ describe('DocumentContext', function () {
 			assert.equal(pc.snapshots.length, 1);
 			assert.equal(pc.snapshots[0].x, 40);
 			assert.equal(pc.snapshots[0].page, 0);
+		});
+
+		it('should save columnWidths if provided', function () {
+			pc.beginColumnGroup(null, {}, true, 0, [100, 200]);
+			assert.deepEqual(pc.snapshots[0].columnWidths, [100, 200]);
+		});
+	});
+
+	describe('Snaking Helpers', function () {
+		it('should identify snaking context when present', function () {
+			pc.beginColumnGroup(null, {}, true);
+			assert.ok(pc.inSnakingColumns());
+			assert.ok(pc.getSnakingSnapshot().snakingColumns);
+		});
+
+		// pdfmake doesn't actually support deep nesting well but DocumentContext should detect it
+		it('should find the deepest snaking snapshot', function () {
+			pc.beginColumnGroup(null, {}, true); // Outer snaking
+			pc.beginColumn();
+			pc.beginColumnGroup(null, {}, false); // Inner non-snaking
+
+			assert.ok(pc.inSnakingColumns());
+			assert.equal(pc.snapshots.length, 2);
+			assert.ok(pc.getSnakingSnapshot().snakingColumns);
+			assert.equal(pc.getSnakingSnapshot(), pc.snapshots[0]);
+
+			pc.beginColumnGroup(null, {}, true); // Inner snaking
+			assert.equal(pc.getSnakingSnapshot(), pc.snapshots[2]);
+		});
+	});
+
+	describe('moveToNextColumn', function () {
+		it('should advance x by column width plus gap when snaking', function () {
+			pc.beginColumnGroup(null, {}, true, 30);
+			pc.beginColumn(100);
+			var before = pc.x;
+			pc.moveToNextColumn();
+			assert.equal(pc.x, before + 100 + 30);
+		});
+
+		it('should use specific column widths if provided', function () {
+			// [100, 200, 150] widths
+			pc.beginColumnGroup(null, {}, true, 30, [100, 200, 150]);
+
+			// Column 1 (Index 0): width 100
+			pc.beginColumn(100);
+			assert.equal(pc.availableWidth, 100);
+
+			// Move to Column 2 (Index 1): width 200
+			pc.moveToNextColumn();
+			assert.equal(pc.availableWidth, 200);
+
+			// Move to Column 3 (Index 2): width 150
+			pc.moveToNextColumn();
+			assert.equal(pc.availableWidth, 150);
+		});
+
+		it('should fallback to lastColumnWidth if specific width not defined', function () {
+			// Only 2 widths defined [100, 200]
+			pc.beginColumnGroup(null, {}, true, 30, [100, 200]);
+
+			// Column 1: 100
+			pc.beginColumn(100);
+
+			// Column 2: 200
+			pc.moveToNextColumn();
+			assert.equal(pc.availableWidth, 200);
+
+			// Column 3: Undefined -> Fallback to last used (200) or availableWidth
+			// current implementation sets lastColumnWidth to colWidth (200) before next
+			pc.moveToNextColumn();
+			assert.equal(pc.availableWidth, 200);
 		});
 	});
 
@@ -71,11 +143,10 @@ describe('DocumentContext', function () {
 		it('should save context in endingCell if provided', function () {
 			var endingCell = {};
 			pc.beginColumnGroup();
-			pc.beginColumn(30, 0, endingCell);
 			pc.y = 150;
 			pc.page = 3;
 			pc.availableHeight = 123;
-			pc.beginColumn(30, 0);
+			pc.beginColumn(30, 0, endingCell);
 
 			assert.equal(endingCell._columnEndingContext.y, 150);
 			assert.equal(endingCell._columnEndingContext.page, 3);
@@ -109,10 +180,10 @@ describe('DocumentContext', function () {
 			var endingCell = {};
 
 			pc.beginColumnGroup();
-			pc.beginColumn(30, 0, endingCell);
 			pc.y = 150;
 			pc.page = 3;
 			pc.availableHeight = 123;
+			pc.beginColumn(30, 0, endingCell);
 			pc.beginColumn(30, 0);
 			pc.y = 100;
 			pc.page = 3;
@@ -131,6 +202,7 @@ describe('DocumentContext', function () {
 			// col1 spans over 2 rows
 			pc.beginColumn(30, 0, endingCell);
 			pc.y = 350;
+			// col 2
 			pc.beginColumn(40);
 			pc.y = 100;
 			// column3 contains a nested table
@@ -147,7 +219,9 @@ describe('DocumentContext', function () {
 			pc.completeColumnGroup();
 
 			//// bottom of all non-spanned columns
-			assert.equal(pc.y, 120);
+			assert.equal(pc.y, 180);
+			// Check context has been stored in ending cell
+			assert.equal(endingCell2._columnEndingContext.y, 120);
 
 			// second row (of nested table)
 			pc.beginColumnGroup();
@@ -165,7 +239,7 @@ describe('DocumentContext', function () {
 			pc.completeColumnGroup();
 
 			//// bottom of all non-spanned columns
-			assert.equal(pc.y, 180);
+			assert.equal(pc.y, 350);
 
 			// second row
 			pc.beginColumnGroup();

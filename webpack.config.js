@@ -6,6 +6,13 @@ var pkg = require('./package.json');
 
 var banner = '/*! ' + pkg.name + ' v' + pkg.version + ', @license ' + pkg.license + ', @link ' + pkg.homepage + ' */';
 
+var supportedBrowsers = {
+	"chrome": "109",
+	"edge": "109",
+	"firefox": "115",
+	"safari": "16"
+};
+
 module.exports = {
 	mode: 'production',
 	entry: {
@@ -19,7 +26,6 @@ module.exports = {
 		// Workaround https://github.com/webpack/webpack/issues/6642 until https://github.com/webpack/webpack/issues/6525 lands.
 		globalObject: `typeof self !== 'undefined' ? self : this`
 	},
-	target: ['web', 'es5'], // For Internet Explorer 11 support
 	resolve: {
 		alias: {
 			fs: path.join(__dirname, './src/browser-extensions/virtual-fs-cjs.js')
@@ -27,14 +33,27 @@ module.exports = {
 		fallback: {
 			crypto: false,
 			buffer: require.resolve('buffer/'),
-			util: require.resolve('util/'),
-			stream: require.resolve('stream-browserify'),
-			zlib: require.resolve('browserify-zlib'),
-			assert: require.resolve('assert/')
+			stream: false
 		}
 	},
 	module: {
 		rules: [
+			{
+				test: /pdfkit[/\\]js[/\\]/,
+				// pdfkit bundles the ICC profile; use a stable registry key without requiring file
+				use: {
+					loader: StringReplacePlugin.replace({
+						replacements: [
+							{
+								pattern: /new URL\(\s*['"]\.\/data\/sRGB_IEC61966_2_1\.icc['"],\s*import\.meta\.url\s*,?\s*\)\.href/g,
+								replacement: function () {
+									return "'pdfkit/builtin/sRGB_IEC61966_2_1.icc'";
+								}
+							}
+						]
+					})
+				}
+			},
 			{
 				enforce: 'pre',
 				test: /\.js$/,
@@ -46,9 +65,7 @@ module.exports = {
 							[
 								"@babel/preset-env",
 								{
-									targets: {
-										"ie": "11"
-									},
+									targets: supportedBrowsers,
 									modules: false,
 									useBuiltIns: 'usage',
 									// TODO: after fix in babel remove corejs version and remove core-js dependency in package.json
@@ -60,47 +77,10 @@ module.exports = {
 					}
 				}
 			},
-			// for fs don't use babel _interopDefault command
 			{
-				enforce: 'pre',
-				test: /pdfkit[/\\]js[/\\]/,
-				use: {
-					loader: StringReplacePlugin.replace({
-						replacements: [
-							{
-								pattern: "import fs from 'fs';",
-								replacement: function () {
-									return "var fs = require('fs');";
-								}
-							}
-						]
-					})
-				}
-			},
-			{
-				test: /\.js$/,
-				include: /(pdfkit|linebreak|fontkit|saslprep|restructure|unicode-trie|unicode-properties|dfa|buffer|png-js|crypto-js)/,
-				use: {
-					loader: 'babel-loader',
-					options: {
-						presets: [
-							[
-								"@babel/preset-env",
-								{
-									targets: {
-										"ie": "11"
-									},
-									modules: false,
-									useBuiltIns: 'usage',
-									// TODO: after fix in babel remove corejs version and remove core-js dependency in package.json
-									corejs: "3.0.0",
-									loose: true
-								}
-							]
-						],
-						plugins: ["@babel/plugin-transform-modules-commonjs"]
-					}
-				}
+				enforce: "pre",
+				test: /\.(cjs|js)$/,
+				use: ["source-map-loader"],
 			},
 			{
 				test: /pdfMake.js$/,
@@ -129,28 +109,6 @@ module.exports = {
 					})
 				}
 			},
-
-			{
-				enforce: 'post',
-				test: /fontkit[/\\]index.js$/,
-				use: {
-					loader: "transform-loader?brfs"
-				}
-			},
-			{
-				enforce: 'post',
-				test: /unicode-properties[/\\]index.js$/,
-				use: {
-					loader: "transform-loader?brfs"
-				}
-			},
-			{
-				enforce: 'post',
-				test: /linebreak[/\\]src[/\\]linebreaker.js/,
-				use: {
-					loader: "transform-loader?brfs"
-				}
-			}
 		]
 	},
 	optimization: {

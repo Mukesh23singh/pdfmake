@@ -55,13 +55,17 @@ class StyleContextStack {
 	/**
 	 * Creates a set of named styles or/and a style-overrides-object based on the item,
 	 * pushes those elements onto the stack for future evaluation and returns the number
-	 * of elements pushed, so they can be easily poped then.
+	 * of elements pushed, so they can be easily popped then.
 	 *
 	 * @param {object} item - an object with optional style property and/or style overrides
 	 * @returns {number} the number of items pushed onto the stack
 	 */
 	autopush(item) {
 		if (isString(item)) {
+			return 0;
+		}
+
+		if (typeof item.section !== 'undefined') { // section node not support style overrides
 			return 0;
 		}
 
@@ -79,50 +83,9 @@ class StyleContextStack {
 			this.push(styleNames[i]);
 		}
 
-		let styleProperties = [
-			'font',
-			'fontSize',
-			'fontFeatures',
-			'bold',
-			'italics',
-			'alignment',
-			'color',
-			'columnGap',
-			'fillColor',
-			'fillOpacity',
-			'decoration',
-			'decorationStyle',
-			'decorationColor',
-			'background',
-			'lineHeight',
-			'characterSpacing',
-			'noWrap',
-			'markerColor',
-			'leadingIndent',
-			'sup',
-			'sub'
-			//'tableCellPadding'
-			// 'cellBorder',
-			// 'headerCellBorder',
-			// 'oddRowCellBorder',
-			// 'evenRowCellBorder',
-			// 'tableBorder'
-		];
-		let styleOverrideObject = {};
-		let pushStyleOverrideObject = false;
-
-		styleProperties.forEach(key => {
-			if (isValue(item[key])) {
-				styleOverrideObject[key] = item[key];
-				pushStyleOverrideObject = true;
-			}
-		});
-
-		if (pushStyleOverrideObject) {
-			this.push(styleOverrideObject);
-		}
-
-		return styleNames.length + (pushStyleOverrideObject ? 1 : 0);
+		// rather than spend significant time making a styleOverrideObject, just add item
+		this.push(item);
+		return styleNames.length + 1;
 	}
 
 	/**
@@ -151,14 +114,43 @@ class StyleContextStack {
 	 * @returns {?any} property value or null if not found
 	 */
 	getProperty(property) {
+
+		const getStylePropertyFromStyle = (styleName, property, visited = new Set()) => {
+			if (visited.has(styleName)) {
+				return undefined;
+			}
+			visited.add(styleName);
+
+			const style = this.styleDictionary[styleName];
+			if (!style) {
+				return undefined;
+			}
+
+			if (isValue(style[property])) {
+				return style[property];
+			}
+
+			if (style.extends) {
+				let parents = Array.isArray(style.extends) ? style.extends : [style.extends];
+				for (let i = parents.length - 1; i >= 0; i--) {
+					let value = getStylePropertyFromStyle(parents[i], property, visited);
+					if (isValue(value)) {
+						return value;
+					}
+				}
+			}
+
+			return undefined;
+		};
+
 		if (this.styleOverrides) {
 			for (let i = this.styleOverrides.length - 1; i >= 0; i--) {
 				let item = this.styleOverrides[i];
 
 				if (isString(item)) { // named-style-override
-					let style = this.styleDictionary[item];
-					if (style && isValue(style[property])) {
-						return style[property];
+					let value = getStylePropertyFromStyle(item, property);
+					if (isValue(value)) {
+						return value;
 					}
 				} else if (isValue(item[property])) { // style-overrides-object
 					return item[property];

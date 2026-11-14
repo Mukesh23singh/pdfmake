@@ -20,7 +20,6 @@ class DocMeasure {
 		this.styleStack = new StyleContextStack(styleDictionary, defaultStyle);
 		this.svgMeasure = svgMeasure;
 		this.tableLayouts = tableLayouts;
-		this.autoImageIndex = 1;
 	}
 
 	/**
@@ -34,12 +33,18 @@ class DocMeasure {
 		return this.measureNode(docStructure);
 	}
 
+	measureBlock(node) {
+		return this.measureNode(node);
+	}
+
 	measureNode(node) {
 		return this.styleStack.auto(node, () => {
 			// TODO: refactor + rethink whether this is the proper way to handle margins
 			node._margin = getNodeMargin(node, this.styleStack);
 
-			if (node.columns) {
+			if (node.section) {
+				return extendMargins(this.measureSection(node));
+			} else if (node.columns) {
 				return extendMargins(this.measureColumns(node));
 			} else if (node.stack) {
 				return extendMargins(this.measureVerticalContainer(node));
@@ -85,9 +90,16 @@ class DocMeasure {
 			let factor = (dimensions.width / dimensions.height > node.fit[0] / node.fit[1]) ? node.fit[0] / dimensions.width : node.fit[1] / dimensions.height;
 			node._width = node._minWidth = node._maxWidth = dimensions.width * factor;
 			node._height = dimensions.height * factor;
+		} else if (node.cover) {
+			node._width = node._minWidth = node._maxWidth = node.cover.width;
+			node._height = node._minHeight = node._maxHeight = node.cover.height;
 		} else {
-			node._width = node._minWidth = node._maxWidth = node.width || dimensions.width;
-			node._height = node.height || (dimensions.height * node._width / dimensions.width);
+			let nodeWidth = isNumber(node.width) ? node.width : undefined;
+			let nodeHeight = isNumber(node.height) ? node.height : undefined;
+			let ratio = dimensions.width / dimensions.height;
+
+			node._width = node._minWidth = node._maxWidth = nodeWidth || (nodeHeight ? (nodeHeight * ratio) : dimensions.width);
+			node._height = nodeHeight || (nodeWidth ? nodeWidth / ratio : dimensions.height);
 
 			if (isNumber(node.maxWidth) && node.maxWidth < node._width) {
 				node._width = node._minWidth = node._maxWidth = node.maxWidth;
@@ -113,19 +125,15 @@ class DocMeasure {
 		node._alignment = this.styleStack.getProperty('alignment');
 	}
 
-	convertIfBase64Image(node) {
-		if (/^data:image\/(jpeg|jpg|png);base64,/.test(node.image)) { // base64 image
-			let label = `$$pdfmake$$${this.autoImageIndex++}`;
-			this.pdfDocument.images[label] = node.image;
-			node.image = label;
-		}
-	}
-
 	measureImage(node) {
-		this.convertIfBase64Image(node);
-
 		let image = this.pdfDocument.provideImage(node.image);
+
 		let imageSize = { width: image.width, height: image.height };
+
+		// If EXIF orientation calls for it, swap width and height
+		if (image.orientation > 4) {
+			imageSize = { width: image.height, height: image.width };
+		}
 
 		this.measureImageWithDimensions(node, imageSize);
 
@@ -138,6 +146,15 @@ class DocMeasure {
 		this.measureImageWithDimensions(node, dimensions);
 
 		node.font = this.styleStack.getProperty('font');
+
+		// SVG requires a defined width and height
+		if (!isNumber(node._width) && !isNumber(node._height)) {
+			throw new Error('SVG is missing defined width and height.');
+		} else if (!isNumber(node._width)) {
+			throw new Error('SVG is missing defined width.');
+		} else if (!isNumber(node._height)) {
+			throw new Error('SVG is missing defined height.');
+		}
 
 		// scale SVG based on final dimension
 		node.svg = this.svgMeasure.writeDimensions(node.svg, { width: node._width, height: node._height });
@@ -170,11 +187,18 @@ class DocMeasure {
 			node.toc.title = this.measureNode(node.toc.title);
 		}
 
-		if (node.toc._items.length > 0) {
+		if (!node.toc._table && node.toc._items.length > 0) {
 			let body = [];
 			let textStyle = node.toc.textStyle || {};
 			let numberStyle = node.toc.numberStyle || textStyle;
 			let textMargin = node.toc.textMargin || [0, 0, 0, 0];
+
+			if (node.toc.sortBy === 'title') {
+				node.toc._items.sort((a, b) => {
+					return a._textNodeRef.text.localeCompare(b._textNodeRef.text, node.toc.sortLocale);
+				});
+			}
+
 			for (let i = 0, l = node.toc._items.length; i < l; i++) {
 				let item = node.toc._items[i];
 				let lineStyle = item._textNodeRef.tocStyle || textStyle;
@@ -185,6 +209,10 @@ class DocMeasure {
 					{ text: item._textNodeRef.text, linkToDestination: destination, alignment: 'left', style: lineStyle, margin: lineMargin },
 					{ text: '00000', linkToDestination: destination, alignment: 'right', _tocItemRef: item._nodeRef, style: lineNumberStyle, margin: [0, lineMargin[1], 0, lineMargin[3]] }
 				]);
+
+				if (node.toc.outlines) {
+					item._textNodeRef.outline = item._textNodeRef.outline || true;
+				}
 			}
 
 			node.toc._table = {
@@ -195,7 +223,9 @@ class DocMeasure {
 				},
 				layout: 'noBorders'
 			};
+		}
 
+		if (node.toc._table) {
 			node.toc._table = this.measureNode(node.toc._table);
 		}
 
@@ -222,7 +252,7 @@ class DocMeasure {
 		return this.textInlines.sizeOfText('9. ', this.styleStack);
 	}
 
-	buildUnorderedMarker(styleStack, gapSize, type) {
+	buildUnorderedMarker(item, styleStack, gapSize, type) {
 		function buildDisc(gapSize, color) {
 			// TODO: ascender-based calculations
 			let radius = gapSize.fontSize / 6;
@@ -269,7 +299,7 @@ class DocMeasure {
 		}
 
 		let marker;
-		let color = styleStack.getProperty('markerColor') || styleStack.getProperty('color') || 'black';
+		let color = StyleContextStack.getStyleProperty(item, styleStack, 'markerColor', undefined) || styleStack.getProperty('color') || 'black';
 
 		switch (type) {
 			case 'circle':
@@ -296,7 +326,7 @@ class DocMeasure {
 		return marker;
 	}
 
-	buildOrderedMarker(counter, styleStack, type, separator) {
+	buildOrderedMarker(item, counter, styleStack, type, separator) {
 		function prepareAlpha(counter) {
 			function toAlpha(num) {
 				return (num >= 26 ? toAlpha((num / 26 >> 0) - 1) : '') + 'abcdefghijklmnopqrstuvwxyz'[num % 26 >> 0];
@@ -376,11 +406,11 @@ class DocMeasure {
 			}
 		}
 
-		let textArray = { text: counterText };
-		let markerColor = styleStack.getProperty('markerColor');
-		if (markerColor) {
-			textArray.color = markerColor;
-		}
+		let markerColor = StyleContextStack.getStyleProperty(item, styleStack, 'markerColor', undefined) || styleStack.getProperty('color') || 'black';
+		let textArray = {
+			text: counterText,
+			color: markerColor
+		};
 
 		return { _inlines: this.textInlines.buildInlines(textArray, styleStack).items };
 	}
@@ -397,7 +427,7 @@ class DocMeasure {
 			let item = items[i] = this.measureNode(items[i]);
 
 			if (!item.ol && !item.ul) {
-				item.listMarker = this.buildUnorderedMarker(style, node._gapSize, item.listType || node.type);
+				item.listMarker = this.buildUnorderedMarker(item, style, node._gapSize, item.listType || node.type);
 			}
 
 			node._minWidth = Math.max(node._minWidth, items[i]._minWidth + node._gapSize.width);
@@ -414,7 +444,7 @@ class DocMeasure {
 		node.separator = node.separator || '.';
 		node.reversed = node.reversed || false;
 		if (!isNumber(node.start)) {
-			node.start = node.reversed ? items.length : 1;
+			node.start = node.reversed ? items.filter(item => !item.ol && !item.ul).length : 1;
 		}
 		node._gapSize = this.gapSizeForList();
 		node._minWidth = 0;
@@ -426,20 +456,21 @@ class DocMeasure {
 
 			if (!item.ol && !item.ul) {
 				let counterValue = isNumber(item.counter) ? item.counter : counter;
-				item.listMarker = this.buildOrderedMarker(counterValue, style, item.listType || node.type, node.separator);
+				item.listMarker = this.buildOrderedMarker(item, counterValue, style, item.listType || node.type, node.separator);
 				if (item.listMarker._inlines) {
 					node._gapSize.width = Math.max(node._gapSize.width, item.listMarker._inlines[0].width);
 				}
-			}  // TODO: else - nested lists numbering
+
+				if (node.reversed) {
+					counter--;
+				} else {
+					counter++;
+				}
+			}
 
 			node._minWidth = Math.max(node._minWidth, items[i]._minWidth);
 			node._maxWidth = Math.max(node._maxWidth, items[i]._maxWidth);
 
-			if (node.reversed) {
-				counter--;
-			} else {
-				counter++;
-			}
 		}
 
 		node._minWidth += node._gapSize.width;
@@ -451,6 +482,14 @@ class DocMeasure {
 				item.listMarker._minWidth = item.listMarker._maxWidth = node._gapSize.width;
 			}
 		}
+
+		return node;
+	}
+
+	measureSection(node) {
+		// TODO: properties
+
+		node.section = this.measureNode(node.section);
 
 		return node;
 	}

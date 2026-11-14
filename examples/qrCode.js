@@ -4,10 +4,21 @@ var pdfmake = require('../js/index'); // only during development, otherwise use 
 var Roboto = require('../fonts/Roboto');
 pdfmake.addFonts(Roboto);
 
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
+
+
 var greeting = 'Can you see me';
 var url = 'http://pdfmake.org';
 var longText = 'The amount of data that can be stored in the QR code symbol depends on the datatype (mode, or input character set), version (1, …, 40, indicating the overall dimensions of the symbol), and error correction level. The maximum storage capacities occur for 40-L symbols (version 40, error correction level L):';
-
 
 function header(text) {
 	return { text: text, margins: [0, 0, 0, 8] };
@@ -31,8 +42,13 @@ var docDefinition = {
 		header('A very long text (' + longText.length + ' chars)'),
 		{ qr: longText },
 		'\n',
+
 		header('same long text with fit = 100 and alignment = right'),
 		{ qr: longText, fit: 150, alignment: 'right' },
+		'\n',
+
+		header('same long text with fit = 100 and padding = 1 modules in pixel'),
+		{ qr: longText, fit: 150, padding: 1 },
 	]
 };
 

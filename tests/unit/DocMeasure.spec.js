@@ -180,6 +180,24 @@ describe('DocMeasure', function () {
 			assert(result._gapSize);
 		});
 
+		it('should not increase listMarker when list item is a nested list', function () {
+			var node = { ol: ['parent item 1', { ol: ['nested item 1', 'nested item 2'] }, 'parent item 2'] };
+			docPreprocessor.preprocessList(node);
+			var result = docMeasure.measureOrderedList(node);
+
+			assert.equal(result.ol[2].listMarker._inlines[0].text, '2. ');
+		});
+
+		it('should not count nested lists when calculating the start of a reversed list', function () {
+			var node = { reversed: true, ol: ['parent item 1', { ol: ['nested item 1', 'nested item 2'] }, 'parent item 2'] };
+			docPreprocessor.preprocessList(node);
+			var result = docMeasure.measureOrderedList(node);
+
+			assert.equal(result.start, 2);
+			assert.equal(result.ol[0].listMarker._inlines[0].text, '2. ');
+			assert.equal(result.ol[2].listMarker._inlines[0].text, '1. ');
+		});
+
 		it('should calculate _minWidth and _maxWidth of all elements', function () {
 			var node = { ol: ['this is a test', 'another one'] };
 			docPreprocessor.preprocessList(node);
@@ -302,12 +320,13 @@ describe('DocMeasure', function () {
 			});
 		});
 
-		it.skip('should set _minWidth and _maxWidth to the sum of column min/max widths', function () {
+		it('should combine star, fixed and auto column widths when measuring a table', function () {
 			docPreprocessor.preprocessTable(tableNode);
 			docMeasure.measureTable(tableNode);
 
-			assert.equal(tableNode._minWidth, 150 + 6 * 12 + 4 * 12 + 6 * 12);
-			assert.equal(tableNode._maxWidth, 912);
+			// Star and auto columns use their measured widths; the fixed column uses 150.
+			assert.equal(tableNode._minWidth, 72 + 150 + 72 + 80);
+			assert.equal(tableNode._maxWidth, 312 + 150 + 240 + 96);
 		});
 
 		it('should support column spans', function () {
@@ -450,12 +469,79 @@ describe('DocMeasure', function () {
 	});
 
 	describe('measureImage', function () {
-		it('should scale height proportionally if only image width is provided');
-		it('should stretch image if both width and height are specified');
-		it('should scales image to fit whole picture in a rectangle if fit is specified');
-		it('should copy alignment from styleStack into image definition object');
-		it('should support dataUri images', function () {
+		it('should measure images with invalid width', function () {
+			var imageNode = {
+				image: '...',
+				width: 'auto',
+			};
+			docMeasure.measureImageWithDimensions(imageNode, { width: 42, height: 42 });
 
+			assert.equal(imageNode._height, 42);
+			assert.equal(imageNode._width, 42);
+		});
+
+		it('should measure images with invalid height', function () {
+			var imageNode = {
+				image: '...',
+				height: 'auto',
+			};
+			docMeasure.measureImageWithDimensions(imageNode, { width: 42, height: 42 });
+
+			assert.equal(imageNode._height, 42);
+			assert.equal(imageNode._width, 42);
+		});
+
+		it('should scale height proportionally if only image width is provided', function () {
+			var node = { width: 100 };
+			docMeasure.measureImageWithDimensions(node, { width: 200, height: 80 });
+			assert.equal(node._width, 100);
+			assert.equal(node._height, 40);
+			assert.equal(node._minWidth, 100);
+			assert.equal(node._maxWidth, 100);
+		});
+
+		it('should stretch image if both width and height are specified', function () {
+			var node = { width: 100, height: 30 };
+			docMeasure.measureImageWithDimensions(node, { width: 200, height: 80 });
+			assert.equal(node._width, 100);
+			assert.equal(node._height, 30);
+		});
+
+		it('should scale images to fit within either dimension of a rectangle', function () {
+			[{ width: 200, height: 80 }, { width: 80, height: 200 }].forEach(function (dimensions) {
+				var node = { fit: [100, 60] };
+				docMeasure.measureImageWithDimensions(node, dimensions);
+				assert(node._width <= 100);
+				assert(node._height <= 60);
+				assert(node._width === 100 || node._height === 60);
+				assert.equal(node._width / node._height, dimensions.width / dimensions.height);
+			});
+		});
+
+		it('should copy alignment from styleStack into image definition object', function () {
+			var measure = new DocMeasure(sampleTestProvider);
+			measure.styleStack.push({ alignment: 'right' });
+			var node = {};
+			measure.measureImageWithDimensions(node, { width: 20, height: 10 });
+			assert.equal(node._alignment, 'right');
+		});
+
+		it('should support dataUri images', function () {
+			var dataUri = 'data:image/png;base64,iVBORw0KGgo=';
+			var provider = {
+				images: {},
+				provideImage: function (src) {
+					assert.equal(src, dataUri);
+					return { width: 20, height: 10 };
+				}
+			};
+			var measure = new DocMeasure(provider);
+			var node = { image: dataUri, width: 40 };
+			assert.strictEqual(measure.measureImage(node), node);
+			assert.equal(node.image, dataUri);
+			assert.deepStrictEqual(provider.images, {});
+			assert.equal(node._width, 40);
+			assert.equal(node._height, 20);
 		});
 	});
 
@@ -474,6 +560,94 @@ describe('DocMeasure', function () {
 			docPreprocessor.preprocessDocument(node);
 			var result = docMeasure.measureDocument(node);
 			assert.deepEqual(result._margin, [123, 3, 5, 6]);
+		});
+
+		it('should apply marginLeft: 10, margin: 20', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {}, {});
+			var node = { text: 'test', marginLeft: 10, margin: 20 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [20, 20, 20, 20]);
+		});
+
+		it('should apply marginLeft: 10, margin: 0', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {}, {});
+			var node = { text: 'test', marginLeft: 10, margin: 0 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 0, 0, 0]);
+		});
+
+		it('should apply margin: 20 from style - overridden with margin: 10', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { margin: { margin: 20 } }, {});
+			var node = { text: 'test', style: 'margin', margin: 10 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [10, 10, 10, 10]);
+		});
+
+		it('should apply margin: 20 from style - marginLeft: 10, margin: 0', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { margin: { margin: 20 } }, {});
+			var node = { text: 'test', style: 'margin', margin: 0 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 0, 0, 0]);
+		});
+
+		it('should apply margin: 20 from style - overridden with marginLeft: 10', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { margin: { margin: 20 } }, {});
+			var node = { text: 'test', style: 'margin', marginLeft: 10 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [10, 20, 20, 20]);
+		});
+
+		it('should apply margin: 20 from style - overridden with marginLeft: 0', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { margin: { margin: 20 } }, {});
+			var node = { text: 'test', style: 'margin', marginLeft: 0 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 20, 20, 20]);
+		});
+
+		it('should apply marginLeft: 20 from style - overridden with 10', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { marginLeft: { marginLeft: 20 } }, {});
+			var node = { text: 'test', style: 'marginLeft', marginLeft: 10 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [10, 0, 0, 0]);
+		});
+
+		it('should apply marginLeft: 20 from style - overridden with 0', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { marginLeft: { marginLeft: 20 } }, {});
+			var node = { text: 'test', style: 'marginLeft', marginLeft: 0 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 0, 0, 0]);
+		});
+
+		it('should apply marginLeft: 20 from style - overridden with margin: 10', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { marginLeft: { marginLeft: 20 } }, {});
+			var node = { text: 'test', style: 'marginLeft', margin: 10 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [10, 10, 10, 10]);
+		});
+
+		it('should apply marginLeft: 20 from style - overridden with margin: 0', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { marginLeft: { marginLeft: 20 } }, {});
+			var node = { text: 'test', style: 'marginLeft', margin: 0 };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 0, 0, 0]);
+		});
+
+		it('should apply margin override from multiple styles', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, { quote: { margin: [20, 0, 20, 0] }, small: { margin: [0, 0, 0, 5] } }, {});
+			var node = { text: 'test', style: ['quote', 'small'] };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [0, 0, 0, 5]);
 		});
 
 		it('should apply sublevel styles not to parent', function () {
@@ -551,5 +725,187 @@ describe('DocMeasure', function () {
 			assert.deepEqual(result._margin, [123, 3, 5, 6]);
 			assert.deepEqual(result.ul[2]._margin, [5, 0, 0, 0]);
 		});
+
+		it('should process margin in extends styles', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				header: {
+					margin: [1, 1, 1, 1],
+				},
+				subheader: {
+					marginLeft: 2,
+					extends: 'header',
+				}
+			}, {});
+			var node = { text: 'test', style: 'subheader' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [2, 1, 1, 1]);
+		});
+
+		it('should process margin in multiple extends styles', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				styleTop: {
+					marginTop: 1,
+				},
+				styleBottom: {
+					marginBottom: 2,
+				},
+				subheader: {
+					marginLeft: 3,
+					extends: ['styleTop', 'styleBottom'],
+				}
+			}, {});
+			var node = { text: 'test', style: 'subheader' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [3, 1, 0, 2]);
+		});
+
+		it('should process margin in multiple extends styles from styles 1', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				marginLeft: {
+					marginLeft: 50,
+					color: 'red',
+				},
+				margin: {
+					margin: [20, 20, 20, 20],
+					color: 'green',
+				},
+				marginExtends1: {
+					extends: ['margin', 'marginLeft']
+				},
+				marginExtends2: {
+					extends: ['marginLeft', 'margin']
+				},
+				marginExtends3: {
+					extends: ['marginExtends1', 'marginExtends2'],
+				},
+				marginExtends4: {
+					extends: ['marginExtends2', 'marginExtends1'],
+				},
+			}, {});
+			var node = { text: 'test', style: 'marginExtends3' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [20, 20, 20, 20]);
+		});
+
+		it('should process margin in multiple extends styles from styles 2', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				marginLeft: {
+					marginLeft: 50,
+					color: 'red',
+				},
+				margin: {
+					margin: [20, 20, 20, 20],
+					color: 'green',
+				},
+				marginExtends1: {
+					extends: ['margin', 'marginLeft']
+				},
+				marginExtends2: {
+					extends: ['marginLeft', 'margin']
+				},
+				marginExtends3: {
+					extends: ['marginExtends1', 'marginExtends2'],
+				},
+				marginExtends4: {
+					extends: ['marginExtends2', 'marginExtends1'],
+				},
+			}, {});
+			var node = { text: 'test', style: 'marginExtends4' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [50, 20, 20, 20]);
+		});
+
+		it('should process margin in multiple extends styles from styles 3', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				marginLeft: {
+					marginLeft: 50,
+					color: 'red',
+				},
+				margin: {
+					margin: [20, 20, 20, 20],
+					color: 'green',
+				},
+				marginExtends1: {
+					extends: ['margin', 'marginLeft']
+				},
+				marginExtends2: {
+					extends: ['marginLeft', 'margin']
+				},
+				marginExtends3: {
+					extends: ['marginExtends1', 'marginExtends2'],
+				},
+				marginExtends4: {
+					extends: ['marginExtends2', 'marginExtends1'],
+				},
+			}, {});
+			var node = { text: 'test', style: ['marginExtends1', 'marginExtends2'] };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [20, 20, 20, 20]);
+		});
+
+		it('should process margin in multiple extends styles from styles 4', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				marginLeft: {
+					marginLeft: 50,
+					color: 'red',
+				},
+				margin: {
+					margin: [20, 20, 20, 20],
+					color: 'green',
+				},
+				marginExtends1: {
+					extends: ['margin', 'marginLeft']
+				},
+				marginExtends2: {
+					extends: ['marginLeft', 'margin']
+				},
+				marginExtends3: {
+					extends: ['marginExtends1', 'marginExtends2'],
+				},
+				marginExtends4: {
+					extends: ['marginExtends2', 'marginExtends1'],
+				},
+			}, {});
+			var node = { text: 'test', style: ['marginExtends2', 'marginExtends1'] };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [50, 20, 20, 20]);
+		});
+
+		it('should process margin in extends styles with infinite loop 1', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				header: {
+					margin: [1, 1, 1, 1],
+					extends: 'subheader',
+				},
+				subheader: {
+					marginLeft: 2,
+					extends: 'header',
+				}
+			}, {});
+			var node = { text: 'test', style: 'subheader' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [2, 1, 1, 1]);
+		});
+
+		it('should process margin in extends styles with infinite loop 2', function () {
+			docMeasure = new DocMeasure(sampleTestProvider, {
+				subheader: {
+					marginLeft: 2,
+					extends: 'subheader',
+				}
+			}, {});
+			var node = { text: 'test', style: 'subheader' };
+			docPreprocessor.preprocessDocument(node);
+			var result = docMeasure.measureDocument(node);
+			assert.deepEqual(result._margin, [2, 0, 0, 0]);
+		});
+
 	});
 });

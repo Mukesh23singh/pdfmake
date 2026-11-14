@@ -9,6 +9,54 @@ describe('Integration test: tables', function () {
 
 	var testHelper = new integrationTestHelper();
 
+	['middle', 'bottom'].forEach(function (verticalAlignment) {
+		[false, true].forEach(function (rowSpan) {
+			[[15, 12], [20, 6], [20, 12]].forEach(function ([precedingLines, cellLines]) {
+				it('restores ' + verticalAlignment + ' cell alignment after pageBreakBefore, rowspan=' + rowSpan + ', preceding=' + precedingLines + ', cell=' + cellLines, function () {
+					function lines(count, prefix) {
+						return Array.from({ length: count }, (_, index) => ({ text: prefix + index }));
+					}
+
+					function render(callback) {
+						var cell = { text: 'Aligned cell', verticalAlignment: verticalAlignment };
+						var body = [[cell, { stack: lines(cellLines, 'right-') }]];
+						if (rowSpan) {
+							cell.rowSpan = 2;
+							body.push([{}, { stack: lines(3, 'last-') }]);
+						}
+						var table = { id: 'table', table: { widths: ['*', '*'], body: body } };
+						if (!callback) {
+							table.pageBreak = 'before';
+						}
+						return new integrationTestHelper().renderPages('A6', {
+							content: lines(precedingLines, 'before-').concat([table]),
+							pageBreakBefore: callback ? node => node.id === 'table' : undefined
+						});
+					}
+
+					function snapshot(pages) {
+						return pages.map(page => ({
+							lines: page.items.filter(entry => entry.type === 'line').map(entry => ({
+								x: entry.item.x,
+								y: entry.item.y,
+								text: entry.item.inlines.map(inline => inline.text).join('')
+							})),
+							alignment: page.items.filter(entry => entry.type === 'beginVerticalAlignment').map(entry => ({
+								height: entry.item.getViewHeight(),
+								nodeHeight: entry.item.getNodeHeight()
+							}))
+						}));
+					}
+
+					var expected = render(false);
+					assert.equal(expected.length, 2);
+					assert.equal(expected[1].items.filter(entry => entry.type === 'beginVerticalAlignment').length, 1);
+					assert.deepStrictEqual(snapshot(render(true)), snapshot(expected));
+				});
+			});
+		});
+	});
+
 	function getColumnText(lines, options) {
 		return lines[options.cell].item.inlines.map(inline => inline.text).join('');
 	}
@@ -25,6 +73,126 @@ describe('Integration test: tables', function () {
 
 	var startX = testHelper.MARGINS.left + TABLE_PADDING_X + TABLE_BORDER_STRENGTH;
 	var startY = testHelper.MARGINS.top + TABLE_PADDING_Y + TABLE_BORDER_STRENGTH;
+
+	['left', 'center', 'right'].forEach(function (alignment) {
+		[false, true].forEach(function (dontBreakRows) {
+			it('aligns a multipage table ' + alignment + ' with dontBreakRows=' + dontBreakRows, function () {
+				var body = [['Header']];
+				for (var i = 0; i < 40; i++) {
+					body.push(['Row ' + i]);
+				}
+				var pages = testHelper.renderPages('A6', {
+					content: [
+						{ margin: [13, 0, 27, 0], tableAlignment: alignment, table: { widths: [80], headerRows: 1, dontBreakRows: dontBreakRows, body: body } },
+						{ text: 'After' }
+					]
+				});
+				var tableWidth = 80 + 2 * TABLE_PADDING_X + 2 * TABLE_BORDER_STRENGTH;
+				var freeWidth = sizes.A6[0] - 80 - 13 - 27 - tableWidth;
+				var offset = alignment === 'center' ? freeWidth / 2 : (alignment === 'right' ? freeWidth : 0);
+				assert(pages.length > 1);
+				pages.forEach(function (page) {
+					var lines = page.items.filter(node => node.type === 'line');
+					lines.forEach(function (node) {
+						var text = node.item.inlines.map(inline => inline.text).join('');
+						assert.equal(node.item.x, text === 'After' ? 40 : startX + 13 + offset);
+					});
+					var borders = page.items.filter(node => node.type === 'vector' && node.item.type === 'line');
+					borders.forEach(function (node) {
+						assert(node.item.x1 >= 40 + 13 + offset);
+						assert(node.item.x2 <= 40 + 13 + offset + tableWidth);
+					});
+				});
+			});
+		});
+	});
+
+	it('aligns a nested table within its cell without changing text alignment', function () {
+		var pages = testHelper.renderPages('A6', {
+			content: [
+				{ table: { widths: [180], body: [[
+					{ tableAlignment: 'center', table: { widths: [60], body: [['Nested']] } }
+				]] } },
+				{ text: 'After' }
+			]
+		});
+		var lines = getCells(pages, { pageNumber: 0 });
+		assert.equal(lines[0].item.x, startX + (180 - 70) / 2 + 5);
+		assert.equal(lines[1].item.x, 40);
+	});
+
+	it('centers auto columns including custom padding, borders and fills', function () {
+		function render(alignment) {
+			return testHelper.renderPages('A6', {
+				content: {
+					layout: {
+						paddingLeft: () => 7,
+						paddingRight: () => 11,
+						vLineWidth: () => 3,
+						fillColor: () => 'yellow'
+					},
+					tableAlignment: alignment,
+					table: { widths: ['auto', 'auto'], body: [['A', 'B']] }
+				}
+			})[0].items;
+		}
+		var left = render('left');
+		var centered = render('center');
+		var borders = left.filter(node => node.type === 'vector' && node.item.type === 'line');
+		var rightEdge = Math.max(...borders.map(node => Math.max(node.item.x1, node.item.x2))) + 1.5;
+		var offset = (sizes.A6[0] - 40 - rightEdge) / 2;
+		assert.equal(left.length, centered.length);
+		left.forEach(function (node, index) {
+			var item = centered[index].item;
+			if (node.type === 'line' || node.item.type === 'rect') {
+				assert(Math.abs(item.x - node.item.x - offset) < 0.000001);
+			} else {
+				assert(Math.abs(item.x1 - node.item.x1 - offset) < 0.000001);
+				assert(Math.abs(item.x2 - node.item.x2 - offset) < 0.000001);
+			}
+		});
+	});
+
+	['*', 300].forEach(function (width) {
+		it('keeps full-width and overflowing tables at the left origin (width=' + width + ')', function () {
+			var pages = testHelper.renderPages('A6', {
+				content: { tableAlignment: 'center', table: { widths: [width], body: [['A']] } }
+			});
+			assert.equal(getCells(pages, { pageNumber: 0 })[0].item.x, startX);
+		});
+	});
+
+	it('keeps a centered table aligned when flowing to the next snaking column', function () {
+		var body = [['Header']];
+		for (var i = 0; i < 40; i++) {
+			body.push(['Row']);
+		}
+		var pages = testHelper.renderPages('A6', {
+			content: {
+				columns: [{ stack: [
+					{ tableAlignment: 'center', table: { widths: [40], headerRows: 1, body: body } },
+					{ text: 'After' }
+				] }, {}],
+				columnGap: 10,
+				snakingColumns: true
+			}
+		});
+		var columnWidth = (sizes.A6[0] - 80 - 10) / 2;
+		var offset = (columnWidth - 50) / 2;
+		var origins = [40, 40 + columnWidth + 10];
+		var foundSecondColumn = false;
+		pages.forEach(function (page) {
+			page.items.filter(node => node.type === 'line').forEach(function (node) {
+				var isAfter = node.item.inlines[0].text === 'After';
+				var expected = origins.map(x => x + (isAfter ? 0 : offset + 5));
+				assert(expected.some(x => Math.abs(x - node.item.x) < 0.000001), 'Unexpected x: ' + node.item.x);
+				if (node.item.x > origins[1]) {
+					foundSecondColumn = true;
+				}
+			});
+		});
+		assert(foundSecondColumn);
+	});
 
 	it('renders a simple table', function () {
 		var dd = {
@@ -162,6 +330,48 @@ describe('Integration test: tables', function () {
 		assert.deepEqual(getColumnText(lines, { cell: 4 }), 'Some Value');
 	});
 
+	[0, 1].forEach(function (outerHeaderRows) {
+		[1, 2].forEach(function (innerHeaderRows) {
+			[1, 2].forEach(function (depth) {
+				it('encloses repeated nested headers (#2090), outer headers=' + outerHeaderRows + ', inner headers=' + innerHeaderRows + ', depth=' + depth, function () {
+					var body = Array.from({ length: innerHeaderRows }, (_, i) => ['Inner ' + i, 'Header']);
+					for (var i = 0; i < 40; i++) body.push(['Row ' + i, 'Value']);
+					var nested = { table: { widths: ['*', '*'], headerRows: innerHeaderRows, body: body } };
+					var colors = ['red', 'blue'];
+					for (var level = 0; level < depth; level++) {
+						let color = colors[level];
+						nested.fillColor = color;
+						nested = {
+							layout: { hLineColor: () => color, vLineColor: () => color },
+							table: { widths: ['*'], headerRows: outerHeaderRows, body: [['Outer ' + level], [nested]] }
+						};
+					}
+					var pages = testHelper.renderPages('A6', { content: [nested] });
+					assert(pages.length > 2);
+					pages.forEach(function (page) {
+						var lines = page.items.filter(node => node.type === 'line');
+						var headers = lines.filter(node => /^Inner /.test(node.item.inlines.map(inline => inline.text).join('')));
+						assert.equal(headers.length, innerHeaderRows);
+						colors.slice(0, depth).forEach(function (color) {
+							var borders = page.items.filter(node => node.type === 'vector' && node.item.type === 'line' &&
+								node.item.lineColor === color && node.item.x1 === node.item.x2);
+							var fills = page.items.filter(node => node.type === 'vector' && node.item.type === 'rect' && node.item.color === color);
+							headers.forEach(function (header) {
+								assert.equal(borders.filter(node => node.item.y1 <= header.item.y &&
+									node.item.y2 >= header.item.y + header.item.getHeight()).length, 2);
+								assert(fills.some(node => node.item.y <= header.item.y &&
+									node.item.y + node.item.h >= header.item.y + header.item.getHeight()));
+							});
+						});
+					});
+					var rowTexts = pages.flatMap(page => page.items.filter(node => node.type === 'line'))
+						.map(node => node.item.inlines.map(inline => inline.text).join('')).filter(text => /^Row /.test(text));
+					assert.deepEqual(rowTexts, Array.from({ length: 40 }, (_, i) => 'Row ' + i));
+				});
+			});
+		});
+	});
+
 	it('renders a simple table with star width', function () {
 		var definedWidth = 25;
 		var dd = {
@@ -286,6 +496,345 @@ describe('Integration test: tables', function () {
 
 		assert.deepEqual(getColumnText(lines, { cell: 0 }), 'Row 1 with rowspan 2');
 		assert.deepEqual(getColumnText(lines, { cell: 1 }), 'Row 2');
+	});
+
+	[false, true].forEach(function (dontBreakRows) {
+		[0, 1].forEach(function (headerRows) {
+			it('keeps table borders around content after pageBreakBefore (#2826), dontBreakRows=' + dontBreakRows + ', headerRows=' + headerRows, function () {
+				function createDefinition() {
+					return {
+						content: [{
+							table: {
+								dontBreakRows: dontBreakRows,
+								headerRows: headerRows,
+								body: Array.from({ length: 50 }, (_, i) => [{
+									id: 'row_' + i,
+									text: 'line ' + i + '\nMultiline: true\npreserveLeadingSpaces: true',
+									preserveLeadingSpaces: true
+								}])
+							}
+						}]
+					};
+					}
+
+				function getPageItems(pages) {
+					return pages.map(page => page.items.map(node => {
+						if (node.type === 'line') {
+							return { text: node.item.inlines.map(inline => inline.text).join(''), x: node.item.x, y: node.item.y };
+						}
+						return node.item;
+					}));
+				}
+
+				var dd = createDefinition();
+				dd.pageBreakBefore = node => node.startPosition.top >= 430;
+				var pages = testHelper.renderPages('A4', dd);
+				var explicit = createDefinition();
+				dd.content[0].table.body.forEach(function (row, index) {
+					if (row[0].pageBreak === 'before') {
+						explicit.content[0].table.body[index][0].pageBreak = 'before';
+					}
+				});
+
+				assert(pages.length > 1);
+				assert.deepEqual(getPageItems(pages), getPageItems(testHelper.renderPages('A4', explicit)));
+				var texts = pages.flatMap(page => page.items.filter(node => node.type === 'line'))
+					.map(node => node.item.inlines.map(inline => inline.text).join(''));
+				assert.deepEqual(texts.filter(text => /^line /.test(text) && text !== 'line 0'),
+					Array.from({ length: 49 }, (_, i) => 'line ' + (i + 1)));
+				pages.forEach(function (page) {
+					var lines = page.items.filter(node => node.type === 'line');
+					var bottom = Math.max(...lines.map(node => node.item.y + node.item.getHeight()));
+					page.items.filter(node => node.type === 'vector' && node.item.type === 'line').forEach(function (node) {
+						assert(Math.max(node.item.y1, node.item.y2) <= bottom + TABLE_PADDING_Y + TABLE_BORDER_STRENGTH);
+					});
+				});
+			});
+		});
+	});
+
+	it('recalculates rowSpan page breaks when pageBreakBefore changes the table layout', function () {
+		function render(useCallback) {
+			var dd = {
+				content: [{
+					table: {
+						widths: [100, 100],
+						body: Array.from({ length: 20 }, (_, i) => [
+							i % 2 === 0 ? { text: 'Span ' + i, rowSpan: 2 } : {},
+							{ id: 'row_' + i, text: 'line ' + i + '\nSecond line', pageBreak: !useCallback && i === 6 ? 'before' : undefined }
+						])
+					}
+				}]
+			};
+			if (useCallback) {
+				dd.pageBreakBefore = node => node.id === 'row_6';
+			}
+			return testHelper.renderPages('A6', dd).map(page => page.items.map(node => {
+				if (node.type === 'line') {
+					return { text: node.item.inlines.map(inline => inline.text).join(''), x: node.item.x, y: node.item.y };
+				}
+				return node.item;
+			}));
+		}
+
+		assert.deepEqual(render(true), render(false));
+	});
+
+	it('does not insert an extra page when combining headerRows, dontBreakRows and cell pageBreak', function () {
+		var dd = {
+			content: {
+				table: {
+					dontBreakRows: true,
+					headerRows: 1,
+					body: [
+						['row Header', 'column B'],
+						['row 1', 'column B'],
+						['row 2', 'column B'],
+						['row 3', 'column B'],
+						[{ text: '', pageBreak: 'after' }, ''],
+						['row 4', 'column B'],
+						['row 5', 'column B']
+					]
+				}
+			}
+		};
+
+		var pages = testHelper.renderPages('A6', dd);
+		var page1Texts = getCells(pages, { pageNumber: 0 }).map(node => node.item.inlines.map(inline => inline.text).join(''));
+		var page2Texts = getCells(pages, { pageNumber: 1 }).map(node => node.item.inlines.map(inline => inline.text).join(''));
+
+		assert.equal(pages.length, 2);
+		assert.deepEqual(page1Texts, ['row Header', 'column B', 'row 1', 'column B', 'row 2', 'column B', 'row 3', 'column B', '', '']);
+		assert.deepEqual(page2Texts, ['row Header', 'column B', 'row 4', 'column B', 'row 5', 'column B']);
+	});
+
+	it('keeps finite page dimensions with dontBreakRows tables without headers', function () {
+		var dd = {
+			content: {
+				table: {
+					dontBreakRows: true,
+					body: [
+						['row 1', 'column B'],
+						['row 2', 'column B'],
+						['row 3', 'column B']
+					]
+				}
+			}
+		};
+
+		var pages = testHelper.renderPages('A6', dd);
+
+		pages.forEach(page => {
+			assert.equal(Number.isFinite(page.pageSize.width), true);
+			assert.equal(Number.isFinite(page.pageSize.height), true);
+		});
+	});
+
+	it('keeps row heights stable when rowSpan crosses pages with dontBreakRows (#2895)', function () {
+		var dd = {
+			content: {
+				table: {
+					dontBreakRows: true,
+					heights: 45,
+					widths: [50, 100, 200, 50],
+					body: [
+						['1', '2', '3', '4'],
+						[{ rowSpan: 4, text: '4span' }, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 2, text: '2span' }, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 2, text: null }, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 2, text: null }, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 15, text: 'span 15', maxHeight: 50 }, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 5, text: 'span 5' }, null, null, null],
+						[null, null, null, null],
+						[{ rowSpan: 2, text: null }, null, null, null],
+						[null, null, null, null],
+						[null, null, null, null]
+					]
+				}
+			}
+		};
+
+		var pages = testHelper.renderPages('A4', dd);
+		var lastPage = pages[pages.length - 1];
+		var horizontalLineYs = [...new Set(
+			lastPage.items
+				.filter(node => node.type === 'vector' && node.item.type === 'line' && Math.abs(node.item.y1 - node.item.y2) < 0.001)
+				.map(node => Number(node.item.y1.toFixed(3)))
+		)].sort((a, b) => a - b);
+
+		var maxGap = 0;
+		for (var i = 1; i < horizontalLineYs.length; i++) {
+			maxGap = Math.max(maxGap, horizontalLineYs[i] - horizontalLineYs[i - 1]);
+		}
+
+		// Each row is 45pt tall. A gap above ~90pt would indicate a blown-out row caused
+		// by a negative discountY when a rowspan started on a previous page. Allow up to
+		// 2x row height (90pt) as a safe upper bound; anything beyond that is the bug.
+		assert.ok(maxGap < 90, 'max gap between horizontal lines was ' + maxGap + 'pt, expected < 90pt');
+	});
+
+	it('keeps rowSpan header verticalAlignment stable on repeated tables (#2925)', function () {
+		function createReportTable() {
+			var rows = [
+				['D-001', '500', '480', '-20', 'In Progress'],
+				['D-002', '300', '350', '+50', 'Exceeded'],
+				['D-003', '750', '750', '0', 'Achieved'],
+				['D-004', '200', '180', '-20', 'Under Review'],
+				['D-005', '400', '410', '+10', 'Achieved']
+			];
+
+			return {
+				margin: [0, 5, 0, 15],
+				table: {
+					headerRows: 2,
+					widths: ['auto', '*', '*', '*', 'auto'],
+					body: [
+						[
+							{ text: 'Dept ID', style: 'tableHeader', rowSpan: 2, verticalAlignment: 'middle' },
+							{ text: 'Performance Indicators', style: 'tableHeader', colSpan: 3 },
+							{},
+							{},
+							{ text: 'Status', style: 'tableHeader', rowSpan: 2 }
+						],
+						[{}, { text: 'Target', style: 'tableHeader' }, { text: 'Actual', style: 'tableHeader' }, { text: 'Gap', style: 'tableHeader' }, {}],
+						...rows,
+						...rows,
+						...rows
+					]
+				}
+			};
+		}
+
+		var content = [];
+		for (var i = 1; i <= 3; i++) {
+			content.push({ text: 'Statistical Report - Page ' + i, style: 'header' });
+			content.push(createReportTable());
+			if (i < 3) {
+				content.push({ text: '', pageBreak: 'after' });
+			}
+		}
+
+		var pages = testHelper.renderPages('A4', {
+			content,
+			styles: {
+				header: { fontSize: 18, bold: true, alignment: 'center' },
+				tableHeader: { bold: true, fillColor: '#eeeeee' }
+			}
+		});
+
+		var viewHeights = pages.map(page => {
+			var verticalAlignmentMarker = page.items.find(node => node.type === 'beginVerticalAlignment');
+
+			return verticalAlignmentMarker.item.getViewHeight();
+		});
+
+		assert.equal(pages.length, 3);
+		assert.deepEqual(viewHeights, [viewHeights[0], viewHeights[0], viewHeights[0]]);
+		assert.ok(viewHeights[0] > 0, 'rowSpan header view height must remain positive');
+	});
+
+	function findFillIndex(items, color) {
+		return items.findIndex(node => node.type === 'vector' && node.item.color === color);
+	}
+
+	function findLineIndex(items, text) {
+		return items.findIndex(node => node.type === 'line' && node.item.inlines.map(inline => inline.text).join('') === text);
+	}
+
+	['middle', 'bottom'].forEach(function (verticalAlignment) {
+		[[false, false], [true, false], [false, true]].forEach(function ([outerDontBreakRows, innerDontBreakRows]) {
+			it('moves nested table backgrounds with ' + verticalAlignment + ' aligned cell content, outer dontBreakRows=' + outerDontBreakRows + ', inner dontBreakRows=' + innerDontBreakRows + ' (#2965)', function () {
+				var pages = testHelper.renderPages('A6', {
+					content: [{
+						table: {
+							dontBreakRows: outerDontBreakRows,
+							widths: ['*', '*'],
+							heights: [150],
+							body: [[
+								{ text: 'Sibling', fillColor: '#ff0000' },
+								{
+									verticalAlignment: verticalAlignment,
+									fillColor: '#00ff00',
+									stack: [
+										{ text: 'Before nested' },
+										{
+											table: {
+												dontBreakRows: innerDontBreakRows,
+												body: [[{ text: 'Nested', fillColor: '#0000ff' }]]
+											}
+										}
+									]
+								}
+							]]
+						}
+					}]
+				});
+
+				var items = pages[0].items;
+				var beginIndex = items.findIndex(node => node.type === 'beginVerticalAlignment');
+				var endIndex = items.findIndex(node => node.type === 'endVerticalAlignment');
+				var nestedFillIndex = findFillIndex(items, '#0000ff');
+
+				assert.equal(pages.length, 1);
+				assert.ok(beginIndex >= 0 && beginIndex < endIndex);
+
+				// background of the nested table is shifted together with the aligned content
+				assert.ok(nestedFillIndex > beginIndex, 'nested fill (' + nestedFillIndex + ') must follow the vertical alignment begin (' + beginIndex + ')');
+				assert.ok(nestedFillIndex < findLineIndex(items, 'Before nested'), 'nested fill must be drawn before the aligned text');
+				assert.ok(nestedFillIndex < findLineIndex(items, 'Nested'), 'nested fill must be drawn before the nested text');
+
+				// backgrounds of the aligned cell and its siblings fill the whole row and are not shifted
+				assert.ok(findFillIndex(items, '#00ff00') < beginIndex);
+				assert.ok(findFillIndex(items, '#ff0000') < findLineIndex(items, 'Sibling'));
+			});
+		});
+	});
+
+	it('keeps sibling cell backgrounds below their text when a vertically aligned cell breaks across pages', function () {
+		var lines = Array.from({ length: 40 }, (_, index) => ({ text: 'Line ' + index }));
+		var pages = testHelper.renderPages('A6', {
+			content: [{
+				table: {
+					widths: ['*', '*'],
+					body: [[
+						{ text: 'Sibling', fillColor: '#ff0000' },
+						{
+							verticalAlignment: 'bottom',
+							stack: lines.concat([{ table: { body: [[{ text: 'Nested', fillColor: '#0000ff' }]] } }])
+						}
+					]]
+				}
+			}]
+		});
+
+		assert.ok(pages.length > 1);
+		var items = pages[0].items;
+		assert.ok(findFillIndex(items, '#ff0000') < findLineIndex(items, 'Sibling'));
+		assert.ok(findFillIndex(items, '#ff0000') < findLineIndex(items, 'Line 0'));
+
+		var lastItems = pages[pages.length - 1].items;
+		assert.ok(findFillIndex(lastItems, '#0000ff') < findLineIndex(lastItems, 'Nested'));
 	});
 
 });

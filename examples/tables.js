@@ -1,11 +1,19 @@
-/*eslint no-unused-vars: ["error", {"args": "none"}]*/
-
-
 var pdfmake = require('../js/index'); // only during development, otherwise use the following line
 //var pdfmake = require('pdfmake');
 
 var Roboto = require('../fonts/Roboto');
 pdfmake.addFonts(Roboto);
+
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
 
 
 var docDefinition = {
@@ -89,7 +97,7 @@ var docDefinition = {
 			table: {
 				widths: ['*', 'auto'],
 				body: [
-					['This is a star-sized column. The next column over, an auto-sized column, will wrap to accomodate all the text in this cell.', 'I am auto sized.'],
+					['This is a star-sized column. The next column over, an auto-sized column, will wrap to accommodate all the text in this cell.', 'I am auto sized.'],
 				]
 			}
 		},
@@ -98,7 +106,7 @@ var docDefinition = {
 			table: {
 				widths: ['*', 'auto'],
 				body: [
-					['This is a star-sized column. The next column over, an auto-sized column, will not wrap to accomodate all the text in this cell, because it has been given the noWrap style.', { text: 'I am auto sized.', noWrap: true }],
+					['This is a star-sized column. The next column over, an auto-sized column, will not wrap to accommodate all the text in this cell, because it has been given the noWrap style.', { text: 'I am auto sized.', noWrap: true }],
 				]
 			}
 		},
@@ -137,6 +145,18 @@ var docDefinition = {
 					['row 1', 'column B'],
 					['row 2', 'column B'],
 					['row 3', 'column B']
+				]
+			}
+		},
+		{ text: 'A centered table with left-aligned cell text', style: 'subheader' },
+		{
+			style: 'tableExample',
+			tableAlignment: 'center', // aligns the whole table: left (default), center or right
+			table: {
+				widths: ['auto', 'auto'],
+				body: [
+					['Item', 'Quantity'],
+					['Example', '2']
 				]
 			}
 		},
@@ -287,6 +307,7 @@ var docDefinition = {
 				]
 			},
 			layout: {
+				// eslint-disable-next-line no-unused-vars
 				fillColor: function (rowIndex, node, columnIndex) {
 					return (rowIndex % 2 === 0) ? '#CCCCCC' : null;
 				}
@@ -376,9 +397,11 @@ var docDefinition = {
 				vLineWidth: function (i, node) {
 					return (i === 0 || i === node.table.widths.length) ? 2 : 1;
 				},
+				// eslint-disable-next-line no-unused-vars
 				hLineColor: function (i, node) {
 					return 'black';
 				},
+				// eslint-disable-next-line no-unused-vars
 				vLineColor: function (i, node) {
 					return 'black';
 				},
@@ -681,7 +704,75 @@ var docDefinition = {
 					],
 				],
 			},
-		}
+		},
+		{ text: 'Image on table', pageBreak: 'before', style: 'subheader' },
+		{
+			style: 'tableExample',
+			color: '#444',
+			table: {
+				widths: [200, 'auto', 'auto'],
+				headerRows: 2,
+				// keepWithHeaderRows: 1,
+				body: [
+					[
+						{
+							text: 'Header with Colspan = 3',
+							style: 'tableHeader',
+							colSpan: 3,
+							borderColor: ['#ff00ff', '#00ffff', '#ff00ff', '#00ffff'],
+							alignment: 'center',
+						},
+						{},
+						{},
+					],
+					[
+						{
+							text: 'Header 1',
+							style: 'tableHeader',
+							alignment: 'center',
+						},
+						{
+							text: 'Header 2',
+							style: 'tableHeader',
+							alignment: 'center',
+						},
+						{
+							text: 'Header 3',
+							style: 'tableHeader',
+							alignment: 'center',
+						},
+					],
+					[
+            {
+              image: 'images/sampleImage.jpg',
+              cover: {width: 100, height: 100 },
+            },
+            {
+              image: 'images/sampleImage.jpg',
+              cover: {width: 100, height: 100 },
+            },
+            {
+              image: 'images/sampleImage.jpg',
+              cover: {width: 100, height: 100 },
+            },
+					],
+					[
+            {
+              image: 'images/sampleImage.jpg',
+              fit: [100, 100],
+            },
+            {
+              image: 'images/sampleImage.jpg',
+              fit: [100, 100],
+            },
+            {
+              image: 'images/sampleImage.jpg',
+              fit: [100, 100],
+            },
+					],
+				],
+			},
+		},
 	],
 	styles: {
 		header: {

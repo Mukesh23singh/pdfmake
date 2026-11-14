@@ -4,6 +4,17 @@ var pdfmake = require('../js/index'); // only during development, otherwise use 
 var Roboto = require('../fonts/Roboto');
 pdfmake.addFonts(Roboto);
 
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
+
 
 var docDefinition = {
 	content: [
@@ -59,6 +70,23 @@ var docDefinition = {
 		'\n\n',
 		{
 			text: 'Text background pattern', background: ['stripe45d', 'gray']
+		},
+		{
+			text: 'Customize word break:',
+			pageBreak: 'before'
+		},
+		{
+			text: 'DefaultLine\n"BreakBehaviour" "ForATextWithVeryVery" "LongLongWords"',
+			fontSize: 30,
+		},
+		{
+			text: '\n\n',
+			fontSize: 30,
+		},
+		{
+			text: 'BreakAll\n"LineBreakBehaviour" "ForATextWithVeryVery" "LongLongWords"',
+			fontSize: 30,
+			wordBreak: 'break-all',
 		}
 	],
 	patterns: {

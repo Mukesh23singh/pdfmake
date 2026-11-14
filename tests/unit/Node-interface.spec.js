@@ -1,0 +1,166 @@
+'use strict';
+
+var assert = require('assert');
+var fs = require('fs/promises');
+var path = require('path');
+var os = require('os');
+
+var pdfmake = require('../../js/index');
+
+pdfmake.addFonts({
+	Roboto: {
+		normal: 'fonts/Roboto/Roboto-Regular.ttf',
+		bold: 'fonts/Roboto/Roboto-Medium.ttf',
+		italics: 'fonts/Roboto/Roboto-Italic.ttf',
+		bolditalics: 'fonts/Roboto/Roboto-MediumItalic.ttf'
+	}
+});
+
+describe('Node interface', function () {
+	describe('getBuffer', function () {
+		it('should return buffer', async function () {
+
+			var docDefinition = {
+				content: [
+					'First paragraph',
+					'Another paragraph, this time a little bit longer to make sure, this line will be divided into at least two lines'
+				]
+			};
+
+			pdfmake.setUrlAccessPolicy(() => {
+				return true;
+			});
+
+			pdfmake.setLocalAccessPolicy(() => {
+				return true;
+			});
+
+			var pdf = pdfmake.createPdf(docDefinition);
+			await pdf.getBuffer().then(() => {
+				//
+			}, err => {
+				throw err;
+			});
+
+		});
+
+	});
+
+	describe('write', function () {
+		describe('with buffered output', function () {
+			let tmpDir;
+			let filename;
+
+			beforeEach(async function () {
+				pdfmake.setUrlAccessPolicy(() => true);
+				pdfmake.setLocalAccessPolicy(() => true);
+				tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdfmake-buffered-write-'));
+				filename = path.join(tmpDir, 'document.pdf');
+			});
+
+			afterEach(async function () {
+				await fs.rm(filename, { force: true });
+				await fs.rmdir(tmpDir);
+			});
+
+			['getBuffer', 'getBase64', 'getDataUrl'].forEach(function (method) {
+				it('should write the complete PDF after ' + method + ' has finished', async function () {
+					const pdf = pdfmake.createPdf({ content: ['Buffered PDF'] });
+					await pdf[method]();
+					const buffer = await pdf.getBuffer();
+
+					await pdf.write(filename);
+
+					assert.ok(buffer.length > 0);
+					assert.deepStrictEqual(await fs.readFile(filename), buffer);
+					await assert.rejects(pdf.getStream(), /PDF stream has already been consumed/);
+				});
+			});
+
+			[true, false].forEach(function (bufferFirst) {
+				it('should write while getBuffer is pending (' + (bufferFirst ? 'buffer first' : 'write first') + ')', async function () {
+					const pdf = pdfmake.createPdf({ content: ['Concurrent output'] });
+					const bufferPromise = bufferFirst ? pdf.getBuffer() : null;
+					const writePromise = pdf.write(filename);
+					const buffer = await (bufferPromise || pdf.getBuffer());
+					await writePromise;
+
+					assert.ok(buffer.length > 0);
+					assert.deepStrictEqual(await fs.readFile(filename), buffer);
+				});
+			});
+
+			it('should reject file write errors when using buffered output', async function () {
+				const pdf = pdfmake.createPdf({ content: ['Buffered PDF'] });
+				await pdf.getBuffer();
+
+				await assert.rejects(pdf.write(path.join(tmpDir, 'missing-directory', 'document.pdf')), { code: 'ENOENT' });
+			});
+		});
+
+		it('should write file', async function () {
+
+			var docDefinition = {
+				content: [
+					'First paragraph',
+					'Another paragraph, this time a little bit longer to make sure, this line will be divided into at least two lines'
+				]
+			};
+
+			pdfmake.setUrlAccessPolicy(() => {
+				return true;
+			});
+
+			pdfmake.setLocalAccessPolicy(() => {
+				return true;
+			});
+
+			const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdfmake-'));
+			const pdfFilename = path.join(tmpDir, 'document.pdf');
+
+			var pdf = pdfmake.createPdf(docDefinition);
+			await pdf.write(pdfFilename);
+
+			const stats = await fs.stat(pdfFilename);
+			assert.ok(stats.size > 0);
+
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		});
+
+	});
+
+	describe('setUrlAccessPolicy', function () {
+		it('should set url access policy', async function () {
+
+			var docDefinition = {
+				content: [
+					'First paragraph',
+					'Another paragraph, this time a little bit longer to make sure, this line will be divided into at least two lines',
+					{ image: 'test1' }
+				],
+				images: {
+					test1: 'https://localhost/image.png'
+				}
+			};
+
+			pdfmake.setUrlAccessPolicy((url) => {
+				const parsedUrl = new URL(url);
+
+				if (parsedUrl.hostname === 'localhost') {
+					return false;
+				}
+
+				return true;
+			});
+
+			await assert.rejects(async function () {
+				var pdf = pdfmake.createPdf(docDefinition);
+				await pdf.getBuffer();
+			}, function (error) {
+				assert.equal(error.message, `Access to URL denied by resource access policy: https://localhost/image.png`);
+				return true;
+			});
+		});
+
+	});
+});

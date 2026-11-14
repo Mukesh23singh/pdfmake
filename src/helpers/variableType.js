@@ -11,7 +11,18 @@ export function isString(variable) {
  * @returns {boolean}
  */
 export function isNumber(variable) {
-	return (typeof variable === 'number') || (variable instanceof Number);
+	return ((typeof variable === 'number') || (variable instanceof Number)) && !Number.isNaN(variable);
+}
+
+/**
+ * @param {any} variable
+ * @returns {boolean}
+ */
+export function isPositiveInteger(variable) {
+	if (!isNumber(variable) || !Number.isInteger(variable) || variable <= 0) {
+		return false;
+	}
+	return true;
 }
 
 /**

@@ -1,4 +1,6 @@
 import ElementWriter from './ElementWriter';
+import { normalizePageSize, normalizePageMargin } from './PageSize';
+import DocumentContext from './DocumentContext';
 
 /**
  * An extended ElementWriter which can handle:
@@ -9,6 +11,10 @@ import ElementWriter from './ElementWriter';
  *                 whole block will be rendered on the same page)
  */
 class PageElementWriter extends ElementWriter {
+
+	/**
+	 * @param {DocumentContext} context
+	 */
 	constructor(context) {
 		super(context);
 		this.transactionLevel = 0;
@@ -39,8 +45,8 @@ class PageElementWriter extends ElementWriter {
 		return this._fitOnPage(() => super.addAttachment(attachment, index));
 	}
 
-	addVector(vector, ignoreContextX, ignoreContextY, index) {
-		return super.addVector(vector, ignoreContextX, ignoreContextY, index);
+	addVector(vector, ignoreContextX, ignoreContextY, index, forcePage) {
+		return super.addVector(vector, ignoreContextX, ignoreContextY, index, forcePage);
 	}
 
 	beginClip(width, height) {
@@ -49,6 +55,14 @@ class PageElementWriter extends ElementWriter {
 
 	endClip() {
 		return super.endClip();
+	}
+
+	beginVerticalAlignment(verticalAlignment) {
+		return super.beginVerticalAlignment(verticalAlignment);
+	}
+
+	endVerticalAlignment(verticalAlignment) {
+		return super.endVerticalAlignment(verticalAlignment);
 	}
 
 	addFragment(fragment, useBlockXOffset, useBlockYOffset, dontUpdateContextPosition) {
@@ -73,6 +87,19 @@ class PageElementWriter extends ElementWriter {
 		this.emit('pageChanged', {
 			prevPage: nextPage.prevPage,
 			prevY: nextPage.prevY,
+			y: this.context().y
+		});
+	}
+
+	addPage(pageSize, pageOrientation, pageMargin, customProperties = {}) {
+		let prevPage = this.page;
+		let prevY = this.y;
+
+		this.context().addPage(normalizePageSize(pageSize, pageOrientation), normalizePageMargin(pageMargin), customProperties);
+
+		this.emit('pageChanged', {
+			prevPage: prevPage,
+			prevY: prevY,
 			y: this.context().y
 		});
 	}
@@ -146,11 +173,134 @@ class PageElementWriter extends ElementWriter {
 		this.repeatables.pop();
 	}
 
+	/**
+	 * Move to the next column in a column group (snaking columns).
+	 * Handles repeatables and emits columnChanged event.
+	 * @param {Function} [updateContext] - Adjust the new column before inserting repeatables
+	 */
+	moveToNextColumn(updateContext) {
+		let nextColumn = this.context().moveToNextColumn();
+		if (updateContext) {
+			updateContext(this.context());
+		}
+
+		// Handle repeatables (like table headers) for the new column
+		this.repeatables.forEach(function (rep) {
+			// In snaking columns, we WANT headers to repeat.
+			// However, in Standard Page Breaks, headers are drawn using useBlockXOffset=true (original absolute X).
+			// This works for page breaks because margins are consistent.
+			// In Snaking Columns, the X position changes for each column.
+			// If we use true, the header is drawn at the *original* X position (Col 1), overlapping/invisible.
+			// We MUST use false to force drawing relative to the CURRENT context X (new column start).
+			this.addFragment(rep, false);
+		}, this);
+
+		this.emit('columnChanged', {
+			prevY: nextColumn.prevY,
+			y: this.context().y
+		});
+	}
+
+	/**
+	 * Check if currently in a column group that can move to next column.
+	 * Only returns true if snakingColumns is enabled for the column group.
+	 * @returns {boolean}
+	 */
+	canMoveToNextColumn() {
+		let ctx = this.context();
+		let snakingSnapshot = ctx.getSnakingSnapshot();
+
+		if (snakingSnapshot) {
+			// Check if we're inside a nested (non-snaking) column group.
+			// If so, don't allow a snaking column move — it would corrupt
+			// the inner row's layout (e.g. product name in col 1, price in col 2).
+			// The inner row should complete via normal page break instead.
+			for (let i = ctx.snapshots.length - 1; i >= 0; i--) {
+				let snap = ctx.snapshots[i];
+				if (snap.snakingColumns) {
+					break; // Reached the snaking snapshot, no inner groups found
+				}
+				if (!snap.overflowed) {
+					return false; // Found a non-snaking, non-overflowed inner group
+				}
+			}
+
+			let overflowCount = 0;
+			for (let i = ctx.snapshots.length - 1; i >= 0; i--) {
+				if (ctx.snapshots[i].overflowed) {
+					overflowCount++;
+				} else {
+					break;
+				}
+			}
+
+			if (snakingSnapshot.columnWidths &&
+				overflowCount >= snakingSnapshot.columnWidths.length - 1) {
+				return false;
+			}
+
+			let currentColumnWidth = ctx.availableWidth || ctx.lastColumnWidth || 0;
+			let nextColumnWidth = snakingSnapshot.columnWidths ?
+				snakingSnapshot.columnWidths[overflowCount + 1] : currentColumnWidth;
+			let nextX = ctx.x + currentColumnWidth + (snakingSnapshot.gap || 0);
+			let page = ctx.getCurrentPage();
+			let pageWidth = page.pageSize.width;
+			let rightMargin = page.pageMargins ? page.pageMargins.right : 0;
+			let parentRightMargin = ctx.marginXTopParent ? ctx.marginXTopParent[1] : 0;
+			let rightBoundary = pageWidth - rightMargin - parentRightMargin;
+
+			return (nextX + nextColumnWidth) <= (rightBoundary + 1);
+		}
+		return false;
+	}
+
 	_fitOnPage(addFct) {
 		let position = addFct();
 		if (!position) {
-			this.moveToNextPage();
-			position = addFct();
+			if (this.canMoveToNextColumn()) {
+				this.moveToNextColumn();
+				position = addFct();
+			}
+
+			if (!position) {
+				let ctx = this.context();
+				let snakingSnapshot = ctx.getSnakingSnapshot();
+
+				if (snakingSnapshot) {
+					if (ctx.isInNestedNonSnakingGroup()) {
+						// Inside a table cell within snaking columns — use standard page break.
+						// Don't reset snaking state; the table handles its own breaks.
+						// Column breaks happen between rows in processTable instead.
+						this.moveToNextPage();
+					} else {
+						this.moveToNextPage();
+
+						// Save lastColumnWidth before reset — if we're inside a nested
+						// column group (e.g. product/price row), the reset would overwrite
+						// it with the snaking column width, corrupting inner column layout.
+						let savedLastColumnWidth = ctx.lastColumnWidth;
+						ctx.resetSnakingColumnsForNewPage();
+						ctx.lastColumnWidth = savedLastColumnWidth;
+					}
+
+					position = addFct();
+				} else {
+					while (ctx.snapshots.length > 0 && ctx.snapshots[ctx.snapshots.length - 1].overflowed) {
+						let popped = ctx.snapshots.pop();
+						let prevSnapshot = ctx.snapshots[ctx.snapshots.length - 1];
+						if (prevSnapshot) {
+							ctx.x = prevSnapshot.x;
+							ctx.y = prevSnapshot.y;
+							ctx.availableHeight = prevSnapshot.availableHeight;
+							ctx.availableWidth = popped.availableWidth;
+							ctx.lastColumnWidth = prevSnapshot.lastColumnWidth;
+						}
+					}
+
+					this.moveToNextPage();
+					position = addFct();
+				}
+			}
 		}
 		return position;
 	}

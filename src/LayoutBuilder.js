@@ -7,7 +7,7 @@ import TableProcessor from './TableProcessor';
 import Line from './Line';
 import { isString, isValue, isNumber } from './helpers/variableType';
 import { stringifyNode, getNodeId } from './helpers/node';
-import { pack, offsetVector } from './helpers/tools';
+import { pack, offsetVector, convertToDynamicContent } from './helpers/tools';
 import TextInlines from './TextInlines';
 import StyleContextStack from './StyleContextStack';
 
@@ -32,6 +32,10 @@ class LayoutBuilder {
 		this.pageMargins = pageMargins;
 		this.svgMeasure = svgMeasure;
 		this.tableLayouts = {};
+		this.nestedLevel = 0;
+		this.verticalAlignmentItemStack = [];
+		this.backgroundLevel = 0;
+		this.contentNodes = [];
 	}
 
 	registerTableLayouts(tableLayouts) {
@@ -71,9 +75,20 @@ class LayoutBuilder {
 				return false;
 			}
 
-			linearNodeList = linearNodeList.filter(node => node.positions.length > 0);
+			const hasRenderableContent = node => {
+				if (!node || node.positions.length === 0) {
+					return false;
+				}
+				if (node.text === '' && !node.listMarker) {
+					return false;
+				}
+				return true;
+			};
 
-			linearNodeList.forEach(node => {
+			linearNodeList = linearNodeList.filter(hasRenderableContent);
+
+			const nodesByPage = [];
+			linearNodeList.forEach((node, index) => {
 				let nodeInfo = {};
 				[
 					'id', 'text', 'ul', 'ol', 'table', 'image', 'qr', 'canvas', 'svg', 'columns',
@@ -90,43 +105,47 @@ class LayoutBuilder {
 				nodeInfo.stack = Array.isArray(node.stack);
 
 				node.nodeInfo = nodeInfo;
+
+				nodeInfo.pageNumbers.forEach(pageNumber => {
+					nodesByPage[pageNumber] = nodesByPage[pageNumber] || [];
+					nodesByPage[pageNumber].push({ index, nodeInfo });
+				});
 			});
+
+			const findFirstNodeAtOrAfter = (nodes, index) => {
+				let low = 0;
+				let high = nodes.length;
+
+				while (low < high) {
+					const middle = Math.floor((low + high) / 2);
+					if (nodes[middle].index < index) {
+						low = middle + 1;
+					} else {
+						high = middle;
+					}
+				}
+
+				return low;
+			};
+
+			const getNodeInfos = (nodes, start, end) => nodes.slice(start, end).map(entry => entry.nodeInfo);
 
 			for (let index = 0; index < linearNodeList.length; index++) {
 				let node = linearNodeList[index];
 				if (node.pageBreak !== 'before' && !node.pageBreakCalculated) {
 					node.pageBreakCalculated = true;
 					let pageNumber = node.nodeInfo.pageNumbers[0];
+					const nodesOnPage = nodesByPage[pageNumber] || [];
+					const nodeOnPageIndex = findFirstNodeAtOrAfter(nodesOnPage, index);
 
 					if (
 						pageBreakBeforeFct(node.nodeInfo, {
-							getFollowingNodesOnPage: () => {
-								let followingNodesOnPage = [];
-								for (let ii = index + 1, l = linearNodeList.length; ii < l; ii++) {
-									if (linearNodeList[ii].nodeInfo.pageNumbers.indexOf(pageNumber) > -1) {
-										followingNodesOnPage.push(linearNodeList[ii].nodeInfo);
-									}
-								}
-								return followingNodesOnPage;
-							},
+							getFollowingNodesOnPage: () => getNodeInfos(nodesOnPage, nodeOnPageIndex + 1),
 							getNodesOnNextPage: () => {
-								let nodesOnNextPage = [];
-								for (let ii = index + 1, l = linearNodeList.length; ii < l; ii++) {
-									if (linearNodeList[ii].nodeInfo.pageNumbers.indexOf(pageNumber + 1) > -1) {
-										nodesOnNextPage.push(linearNodeList[ii].nodeInfo);
-									}
-								}
-								return nodesOnNextPage;
+								const nextPageNodes = nodesByPage[pageNumber + 1] || [];
+								return getNodeInfos(nextPageNodes, findFirstNodeAtOrAfter(nextPageNodes, index + 1));
 							},
-							getPreviousNodesOnPage: () => {
-								let previousNodesOnPage = [];
-								for (let ii = 0; ii < index; ii++) {
-									if (linearNodeList[ii].nodeInfo.pageNumbers.indexOf(pageNumber) > -1) {
-										previousNodesOnPage.push(linearNodeList[ii].nodeInfo);
-									}
-								}
-								return previousNodesOnPage;
-							},
+							getPreviousNodesOnPage: () => getNodeInfos(nodesOnPage, 0, nodeOnPageIndex),
 						})
 					) {
 						node.pageBreak = 'before';
@@ -148,7 +167,7 @@ class LayoutBuilder {
 		}
 
 		let result = this.tryLayoutDocument(docStructure, pdfDocument, styleDictionary, defaultStyle, background, header, footer, watermark);
-		while (addPageBreaksIfNecessary(result.linearNodeList, result.pages)) {
+		while (addPageBreaksIfNecessary(result.pageBreakNodes, result.pages)) {
 			resetXYs(result);
 			result = this.tryLayoutDocument(docStructure, pdfDocument, styleDictionary, defaultStyle, background, header, footer, watermark);
 		}
@@ -167,25 +186,47 @@ class LayoutBuilder {
 		watermark
 	) {
 
+		const isNecessaryAddFirstPage = (docStructure) => {
+			if (docStructure.stack && docStructure.stack.length > 0 && docStructure.stack[0].section) {
+				return false;
+			} else if (docStructure.section) {
+				return false;
+			}
+
+			return true;
+		};
+
 		this.linearNodeList = [];
+		this.contentNodes = [];
 		docStructure = this.docPreprocessor.preprocessDocument(docStructure);
 		docStructure = this.docMeasure.measureDocument(docStructure);
 
-		this.writer = new PageElementWriter(
-			new DocumentContext(this.pageSize, this.pageMargins));
+		this.writer = new PageElementWriter(new DocumentContext());
 
-		this.writer.context().addListener('pageAdded', () => {
-			this.addBackground(background);
+		this.writer.context().addListener('pageAdded', (page) => {
+			let backgroundGetter = background;
+			if (page.customProperties['background'] || page.customProperties['background'] === null) {
+				backgroundGetter = page.customProperties['background'];
+			}
+
+			this.addBackground(backgroundGetter);
 		});
 
-		this.addBackground(background);
-		this.processNode(docStructure);
-		this.addHeadersAndFooters(header, footer);
-		if (watermark != null) {
-			this.addWatermark(watermark, pdfDocument, defaultStyle);
+		if (isNecessaryAddFirstPage(docStructure)) {
+			this.writer.addPage(
+				this.pageSize,
+				null,
+				this.pageMargins
+			);
 		}
 
-		return { pages: this.writer.context().pages, linearNodeList: this.linearNodeList };
+		this.processNode(docStructure);
+		// Backgrounds, headers and footers must not participate in page break decisions.
+		const pageBreakNodes = this.contentNodes.slice();
+		this.addHeadersAndFooters(header, footer);
+		this.addWatermark(watermark, pdfDocument, defaultStyle);
+
+		return { pages: this.writer.context().pages, linearNodeList: this.linearNodeList, pageBreakNodes };
 	}
 
 	addBackground(background) {
@@ -197,32 +238,43 @@ class LayoutBuilder {
 		let pageBackground = backgroundGetter(context.page + 1, pageSize);
 
 		if (pageBackground) {
-			this.writer.beginUnbreakableBlock(pageSize.width, pageSize.height);
-			pageBackground = this.docPreprocessor.preprocessDocument(pageBackground);
-			this.processNode(this.docMeasure.measureDocument(pageBackground));
-			this.writer.commitUnbreakableBlock(0, 0);
-			context.backgroundLength[context.page] += pageBackground.positions.length;
+			this.backgroundLevel++;
+			try {
+				this.writer.beginUnbreakableBlock(pageSize.width, pageSize.height);
+				pageBackground = this.docPreprocessor.preprocessBlock(pageBackground);
+				this.processNode(this.docMeasure.measureBlock(pageBackground));
+				this.writer.commitUnbreakableBlock(0, 0);
+				context.backgroundLength[context.page] += pageBackground.positions.length;
+			} finally {
+				this.backgroundLevel--;
+			}
 		}
 	}
 
-	addStaticRepeatable(headerOrFooter, sizeFunction) {
-		this.addDynamicRepeatable(() => // copy to new object
-			JSON.parse(JSON.stringify(headerOrFooter)), sizeFunction);
-	}
-
-	addDynamicRepeatable(nodeGetter, sizeFunction) {
+	addDynamicRepeatable(nodeGetter, sizeFunction, customPropertyName) {
 		let pages = this.writer.context().pages;
 
 		for (let pageIndex = 0, l = pages.length; pageIndex < l; pageIndex++) {
 			this.writer.context().page = pageIndex;
 
-			let node = nodeGetter(pageIndex + 1, l, this.writer.context().pages[pageIndex].pageSize);
+			let customProperties = this.writer.context().getCurrentPage().customProperties;
+
+			let pageNodeGetter = nodeGetter;
+			if (customProperties[customPropertyName] || customProperties[customPropertyName] === null) {
+				pageNodeGetter = customProperties[customPropertyName];
+			}
+
+			if ((typeof pageNodeGetter === 'undefined') || (pageNodeGetter === null)) {
+				continue;
+			}
+
+			let node = pageNodeGetter(pageIndex + 1, l, this.writer.context().pages[pageIndex].pageSize);
 
 			if (node) {
-				let sizes = sizeFunction(this.writer.context().getCurrentPage().pageSize, this.pageMargins);
+				let sizes = sizeFunction(this.writer.context().getCurrentPage().pageSize, this.writer.context().getCurrentPage().pageMargins);
 				this.writer.beginUnbreakableBlock(sizes.width, sizes.height);
-				node = this.docPreprocessor.preprocessDocument(node);
-				this.processNode(this.docMeasure.measureDocument(node));
+				node = this.docPreprocessor.preprocessBlock(node);
+				this.processNode(this.docMeasure.measureBlock(node));
 				this.writer.commitUnbreakableBlock(sizes.x, sizes.y);
 			}
 		}
@@ -243,58 +295,62 @@ class LayoutBuilder {
 			height: pageMargins.bottom
 		});
 
-		if (typeof header === 'function') {
-			this.addDynamicRepeatable(header, headerSizeFct);
-		} else if (header) {
-			this.addStaticRepeatable(header, headerSizeFct);
-		}
-
-		if (typeof footer === 'function') {
-			this.addDynamicRepeatable(footer, footerSizeFct);
-		} else if (footer) {
-			this.addStaticRepeatable(footer, footerSizeFct);
-		}
+		this.addDynamicRepeatable(header, headerSizeFct, 'header');
+		this.addDynamicRepeatable(footer, footerSizeFct, 'footer');
 	}
 
 	addWatermark(watermark, pdfDocument, defaultStyle) {
-		if (isString(watermark)) {
-			watermark = { 'text': watermark };
-		}
-
-		if (!watermark.text) { // empty watermark text
-			return;
-		}
-
-		watermark.font = watermark.font || defaultStyle.font || 'Roboto';
-		watermark.fontSize = watermark.fontSize || 'auto';
-		watermark.color = watermark.color || 'black';
-		watermark.opacity = isNumber(watermark.opacity) ? watermark.opacity : 0.6;
-		watermark.bold = watermark.bold || false;
-		watermark.italics = watermark.italics || false;
-		watermark.angle = isValue(watermark.angle) ? watermark.angle : null;
-
-		if (watermark.angle === null) {
-			watermark.angle = Math.atan2(this.pageSize.height, this.pageSize.width) * -180 / Math.PI;
-		}
-
-		if (watermark.fontSize === 'auto') {
-			watermark.fontSize = getWatermarkFontSize(this.pageSize, watermark, pdfDocument);
-		}
-
-		let watermarkObject = {
-			text: watermark.text,
-			font: pdfDocument.provideFont(watermark.font, watermark.bold, watermark.italics),
-			fontSize: watermark.fontSize,
-			color: watermark.color,
-			opacity: watermark.opacity,
-			angle: watermark.angle
-		};
-
-		watermarkObject._size = getWatermarkSize(watermark, pdfDocument);
-
 		let pages = this.writer.context().pages;
 		for (let i = 0, l = pages.length; i < l; i++) {
-			pages[i].watermark = watermarkObject;
+			let pageWatermark = watermark;
+			if (pages[i].customProperties['watermark'] || pages[i].customProperties['watermark'] === null) {
+				pageWatermark = pages[i].customProperties['watermark'];
+			}
+
+			if (pageWatermark === undefined || pageWatermark === null) {
+				continue;
+			}
+
+			if (isString(pageWatermark)) {
+				pageWatermark = { 'text': pageWatermark };
+			}
+
+			if (!pageWatermark.text) { // empty watermark text
+				continue;
+			}
+
+			pages[i].watermark = getWatermarkObject({ ...pageWatermark }, pages[i].pageSize, pdfDocument, defaultStyle);
+		}
+
+		function getWatermarkObject(watermark, pageSize, pdfDocument, defaultStyle) {
+			watermark.font = watermark.font || defaultStyle.font || 'Roboto';
+			watermark.fontSize = watermark.fontSize || 'auto';
+			watermark.color = watermark.color || 'black';
+			watermark.opacity = isNumber(watermark.opacity) ? watermark.opacity : 0.6;
+			watermark.bold = watermark.bold || false;
+			watermark.italics = watermark.italics || false;
+			watermark.angle = isValue(watermark.angle) ? watermark.angle : null;
+
+			if (watermark.angle === null) {
+				watermark.angle = Math.atan2(pageSize.height, pageSize.width) * -180 / Math.PI;
+			}
+
+			if (watermark.fontSize === 'auto') {
+				watermark.fontSize = getWatermarkFontSize(pageSize, watermark, pdfDocument);
+			}
+
+			let watermarkObject = {
+				text: watermark.text,
+				font: pdfDocument.provideFont(watermark.font, watermark.bold, watermark.italics),
+				fontSize: watermark.fontSize,
+				color: watermark.color,
+				opacity: watermark.opacity,
+				angle: watermark.angle
+			};
+
+			watermarkObject._size = getWatermarkSize(watermark, pdfDocument);
+
+			return watermarkObject;
 		}
 
 		function getWatermarkSize(watermark, pdfDocument) {
@@ -351,7 +407,7 @@ class LayoutBuilder {
 		}
 	}
 
-	processNode(node) {
+	processNode(node, isVerticalAlignmentAllowed = false) {
 		const applyMargins = callback => {
 			let margin = node._margin;
 
@@ -369,16 +425,58 @@ class LayoutBuilder {
 				}
 			}
 
-			if (margin) {
-				this.writer.context().moveDown(margin[1]);
+			const isDetachedBlock = node.relativePosition || node.absolutePosition;
+
+			// Detached nodes have no margins, their position is only determined by 'x' and 'y'
+			if (margin && !isDetachedBlock) {
+				const availableHeight = this.writer.context().availableHeight;
+				// If top margin is bigger than available space, move to next page
+				// Necessary for nodes inside tables
+				if (availableHeight - margin[1] < 0) {
+					// Consume the whole available space
+					this.writer.context().moveDown(availableHeight);
+					if (this.writer.context().inSnakingColumns() && !this.writer.context().isInNestedNonSnakingGroup()) {
+						this.snakingAwarePageBreak(node.pageOrientation);
+					} else {
+						this.writer.moveToNextPage(node.pageOrientation);
+					}
+					/**
+					 * TODO - Something to consider:
+					 * Right now the node starts at the top of next page (after header)
+					 * Another option would be to apply just the top margin that has not been consumed in the page before
+					 * It would something like: this.write.context().moveDown(margin[1] - availableHeight)
+					 */
+				} else {
+					this.writer.context().moveDown(margin[1]);
+				}
+				// Apply lateral margins
 				this.writer.context().addMargin(margin[0], margin[2]);
 			}
-
 			callback();
 
-			if (margin) {
+			// Detached nodes have no margins, their position is only determined by 'x' and 'y'
+			if (margin && !isDetachedBlock) {
+				const availableHeight = this.writer.context().availableHeight;
+				// If bottom margin is bigger than available space, move to next page
+				// Necessary for nodes inside tables
+				if (availableHeight - margin[3] < 0) {
+					this.writer.context().moveDown(availableHeight);
+					if (this.writer.context().inSnakingColumns() && !this.writer.context().isInNestedNonSnakingGroup()) {
+						this.snakingAwarePageBreak(node.pageOrientation);
+					} else {
+						this.writer.moveToNextPage(node.pageOrientation);
+					}
+					/**
+					 * TODO - Something to consider:
+					 * Right now next node starts at the top of next page (after header)
+					 * Another option would be to apply the bottom margin that has not been consumed in the next page?
+					 * It would something like: this.write.context().moveDown(margin[3] - availableHeight)
+					 */
+				} else {
+					this.writer.context().moveDown(margin[3]);
+				}
+				// Apply lateral margins
 				this.writer.context().addMargin(-margin[0], -margin[2]);
-				this.writer.context().moveDown(margin[3]);
 			}
 
 			if (node.pageBreak === 'after') {
@@ -397,9 +495,21 @@ class LayoutBuilder {
 		};
 
 		this.linearNodeList.push(node);
+		if (this.backgroundLevel === 0) {
+			this.contentNodes.push(node);
+		}
 		decorateNode(node);
 
+		if (this.writer.context().getCurrentPage() !== null) {
+			var prevTop = this.writer.context().getCurrentPosition().top;
+		}
+
 		applyMargins(() => {
+			let verticalAlignment = node.verticalAlignment;
+			if (isVerticalAlignmentAllowed && verticalAlignment) {
+				var verticalAlignmentBegin = this.writer.beginVerticalAlignment(verticalAlignment);
+			}
+
 			let unbreakable = node.unbreakable;
 			if (unbreakable) {
 				this.writer.beginUnbreakableBlock();
@@ -407,6 +517,8 @@ class LayoutBuilder {
 
 			let absPosition = node.absolutePosition;
 			if (absPosition) {
+				var previousAbsolutePosition = this.writer.context().isAbsolutePosition;
+				this.writer.context().isAbsolutePosition = true;
 				this.writer.context().beginDetachedBlock();
 				this.writer.context().moveTo(absPosition.x || 0, absPosition.y || 0);
 			}
@@ -419,6 +531,8 @@ class LayoutBuilder {
 
 			if (node.stack) {
 				this.processVerticalContainer(node);
+			} else if (node.section) {
+				this.processSection(node);
 			} else if (node.columns) {
 				this.processColumns(node);
 			} else if (node.ul) {
@@ -445,6 +559,10 @@ class LayoutBuilder {
 				throw new Error(`Unrecognized document structure: ${stringifyNode(node)}`);
 			}
 
+			if (absPosition) {
+				this.writer.context().isAbsolutePosition = previousAbsolutePosition;
+			}
+
 			if (absPosition || relPosition) {
 				this.writer.context().endDetachedBlock();
 			}
@@ -452,7 +570,54 @@ class LayoutBuilder {
 			if (unbreakable) {
 				this.writer.commitUnbreakableBlock();
 			}
+
+			if (isVerticalAlignmentAllowed && verticalAlignment) {
+				this.verticalAlignmentItemStack.push({
+					begin: verticalAlignmentBegin,
+					end: this.writer.endVerticalAlignment(verticalAlignment)
+				});
+			}
 		});
+
+		if (prevTop !== undefined) {
+			// TODO: for vertical alignment and does not work (at least) when page break in node
+			node.__height = this.writer.context().getCurrentPosition().top - prevTop;
+		}
+	}
+
+	/**
+	 * Helper for page breaks that respects snaking column context.
+	 * When in snaking columns, first tries moving to next column.
+	 * If no columns available, moves to next page and resets x to left margin.
+	 * @param {string} pageOrientation - Optional page orientation for the new page
+	 * @param {TableProcessor} [tableProcessor] - Reapply table alignment in the new column
+	 */
+	snakingAwarePageBreak(pageOrientation, tableProcessor) {
+		let ctx = this.writer.context();
+		let snakingSnapshot = ctx.getSnakingSnapshot();
+		if (!snakingSnapshot) {
+			return;
+		}
+
+		// Try flowing to next column first
+		if (this.writer.canMoveToNextColumn()) {
+			this.writer.moveToNextColumn(tableProcessor ? context => tableProcessor.alignTable(context) : undefined);
+			return;
+		}
+
+		// No more columns available, move to new page
+		this.writer.moveToNextPage(pageOrientation);
+
+		// Reset snaking column state for the new page
+		// Save lastColumnWidth before reset — if we're inside a nested
+		// column group (e.g. product/price row), the reset would overwrite
+		// it with the snaking column width, corrupting inner column layout.
+		let savedLastColumnWidth = ctx.lastColumnWidth;
+		ctx.resetSnakingColumnsForNewPage();
+		ctx.lastColumnWidth = savedLastColumnWidth;
+		if (tableProcessor) {
+			tableProcessor.alignTable(ctx);
+		}
 	}
 
 	// vertical container
@@ -465,8 +630,80 @@ class LayoutBuilder {
 		}, this);
 	}
 
+	// section
+	processSection(sectionNode) {
+		// TODO: properties
+
+		let { pageSize, pageOrientation, pageMargins, header, footer, background, watermark } = sectionNode;
+
+		let page = this.writer.context().getCurrentPage();
+		if (!page || (page && page.items.length)) { // move to new empty page
+			// page definition inherit from current page
+			if (pageSize === 'inherit') {
+				pageSize = page ? { width: page.pageSize.width, height: page.pageSize.height } : undefined;
+			}
+			if (pageOrientation === 'inherit') {
+				pageOrientation = page ? page.pageSize.orientation : undefined;
+			}
+			if (pageMargins === 'inherit') {
+				pageMargins = page ? page.pageMargins : undefined;
+			}
+
+			if (header === 'inherit') {
+				header = page ? page.customProperties.header : undefined;
+			}
+
+			if (footer === 'inherit') {
+				footer = page ? page.customProperties.footer : undefined;
+			}
+
+			if (background === 'inherit') {
+				background = page ? page.customProperties.background : undefined;
+			}
+
+			if (watermark === 'inherit') {
+				watermark = page ? page.customProperties.watermark : undefined;
+			}
+
+			if (header && typeof header !== 'function' && header !== null) {
+				header = convertToDynamicContent(header);
+			}
+
+			if (footer && typeof footer !== 'function' && footer !== null) {
+				footer = convertToDynamicContent(footer);
+			}
+
+			let customProperties = {};
+			if (typeof header !== 'undefined') {
+				customProperties.header = header;
+			}
+
+			if (typeof footer !== 'undefined') {
+				customProperties.footer = footer;
+			}
+
+			if (typeof background !== 'undefined') {
+				customProperties.background = background;
+			}
+
+			if (typeof watermark !== 'undefined') {
+				customProperties.watermark = watermark;
+			}
+
+			this.writer.addPage(
+				pageSize || this.pageSize,
+				pageOrientation,
+				pageMargins || this.pageMargins,
+				customProperties
+			);
+		}
+
+		this.processNode(sectionNode.section);
+	}
+
 	// columns
 	processColumns(columnNode) {
+		this.nestedLevel++;
 		let columns = columnNode.columns;
 		let availableWidth = this.writer.context().availableWidth;
 		let gaps = gapArray(columnNode._gap);
@@ -476,9 +713,18 @@ class LayoutBuilder {
 		}
 
 		ColumnCalculator.buildColumnWidths(columns, availableWidth);
-		let result = this.processRow(columns, columns, gaps);
+		let result = this.processRow({
+			marginX: columnNode._margin ? [columnNode._margin[0], columnNode._margin[2]] : [0, 0],
+			cells: columns,
+			widths: columns,
+			gaps,
+			snakingColumns: columnNode.snakingColumns
+		});
 		addAll(columnNode.positions, result.positions);
-
+		this.nestedLevel--;
+		if (this.nestedLevel === 0) {
+			this.writer.context().resetMarginXTopParent();
+		}
 		function gapArray(gap) {
 			if (!gap) {
 				return null;
@@ -495,88 +741,415 @@ class LayoutBuilder {
 		}
 	}
 
-	processRow(columns, widths, gaps, tableBody, tableRow, height) {
-		const storePageBreakData = data => {
-			let pageDesc;
-
-			for (let i = 0, l = pageBreaks.length; i < l; i++) {
-				let desc = pageBreaks[i];
-				if (desc.prevPage === data.prevPage) {
-					pageDesc = desc;
-					break;
+	/**
+	* Searches for a cell in the same row that starts a rowspan and is positioned immediately before the current cell.
+	* Alternatively, it finds a cell where the colspan initiating the rowspan extends to the cell just before the current one.
+	*
+	* @param {Array<object>} arr - An array representing cells in a row.
+	* @param {number} i - The index of the current cell to search backward from.
+	* @returns {object|null} The starting cell of the rowspan if found; otherwise, `null`.
+	*/
+	_findStartingRowSpanCell(arr, i) {
+		let requiredColspan = 1;
+		for (let index = i - 1; index >= 0; index--) {
+			if (!arr[index]._span) {
+				if (arr[index].rowSpan > 1 && (arr[index].colSpan || 1) === requiredColspan) {
+					return arr[index];
+				} else {
+					return null;
 				}
 			}
+			requiredColspan++;
+		}
+		return null;
+	}
 
+	/**
+	* Retrieves a page break description for a specified page from a list of page breaks.
+	*
+	* @param {Array<object>} pageBreaks - An array of page break descriptions, each containing `prevPage` properties.
+	* @param {number} page - The page number to find the associated page break for.
+	* @returns {object|undefined} The page break description object for the specified page if found; otherwise, `undefined`.
+	*/
+	_getPageBreak(pageBreaks, page) {
+		return pageBreaks.find(desc => desc.prevPage === page);
+	}
+
+	_getPageBreakListBySpan(tableNode, page, rowIndex) {
+		if (!tableNode || !tableNode._breaksBySpan) {
+			return null;
+		}
+		const breaksList = tableNode._breaksBySpan.filter(desc => desc.prevPage === page && rowIndex <= desc.rowIndexOfSpanEnd);
+
+		let y = Number.MAX_VALUE,
+			prevY = Number.MIN_VALUE;
+
+		breaksList.forEach(b => {
+			prevY = Math.max(b.prevY, prevY);
+			y = Math.min(b.y, y);
+		});
+
+		return {
+			prevPage: page,
+			prevY: prevY,
+			y: y
+		};
+	}
+
+	_findSameRowPageBreakByRowSpanData(breaksBySpan, page, rowIndex) {
+		if (!breaksBySpan) {
+			return null;
+		}
+		return breaksBySpan.find(desc => desc.prevPage === page && rowIndex === desc.rowIndexOfSpanEnd);
+	}
+
+	_updatePageBreaksData(pageBreaks, tableNode, rowIndex) {
+		Object.keys(tableNode._bottomByPage).forEach(p => {
+			const page = Number(p);
+			const pageBreak = this._getPageBreak(pageBreaks, page);
+			if (pageBreak) {
+				pageBreak.prevY = Math.max(pageBreak.prevY, tableNode._bottomByPage[page]);
+			}
+			if (tableNode._breaksBySpan && tableNode._breaksBySpan.length > 0) {
+				const breaksBySpanList = tableNode._breaksBySpan.filter(pb => pb.prevPage === page && rowIndex <= pb.rowIndexOfSpanEnd);
+
+				if (breaksBySpanList && breaksBySpanList.length > 0) {
+					breaksBySpanList.forEach(b => {
+						b.prevY = Math.max(b.prevY, tableNode._bottomByPage[page]);
+					});
+				}
+			}
+		});
+	}
+
+	/**
+	* Resolves the Y-coordinates for a target object by comparing two break points.
+	*
+	* @param {object} break1 - The first break point with `prevY` and `y` properties.
+	* @param {object} break2 - The second break point with `prevY` and `y` properties.
+	* @param {object} target - The target object to be updated with resolved Y-coordinates.
+	* @property {number} target.prevY - Updated to the maximum `prevY` value between `break1` and `break2`.
+	* @property {number} target.y - Updated to the minimum `y` value between `break1` and `break2`.
+	*/
+	_resolveBreakY(break1, break2, target) {
+		target.prevY = Math.max(break1.prevY, break2.prevY);
+		target.y = Math.min(break1.y, break2.y);
+	};
+
+	_storePageBreakData(data, startsRowSpan, pageBreaks, tableNode) {
+		if (!startsRowSpan) {
+			let pageDesc = this._getPageBreak(pageBreaks, data.prevPage);
+			let pageDescBySpan = this._getPageBreakListBySpan(tableNode, data.prevPage, data.rowIndex);
 			if (!pageDesc) {
-				pageDesc = data;
+				pageDesc = {
+					...data
+				};
 				pageBreaks.push(pageDesc);
 			}
-			pageDesc.prevY = Math.max(pageDesc.prevY, data.prevY);
-			pageDesc.y = Math.min(pageDesc.y, data.y);
-		};
+			if (pageDescBySpan) {
+				this._resolveBreakY(pageDesc, pageDescBySpan, pageDesc);
+			}
+			this._resolveBreakY(pageDesc, data, pageDesc);
+		} else {
+			const breaksBySpan = tableNode && tableNode._breaksBySpan || null;
+			let pageDescBySpan = this._findSameRowPageBreakByRowSpanData(breaksBySpan, data.prevPage, data.rowIndex);
+			if (!pageDescBySpan) {
+				pageDescBySpan = {
+					...data,
+					rowIndexOfSpanEnd: data.rowIndex + data.rowSpan - 1
+				};
+				if (!tableNode._breaksBySpan) {
+					tableNode._breaksBySpan = [];
+				}
+				tableNode._breaksBySpan.push(pageDescBySpan);
+			}
+			pageDescBySpan.prevY = Math.max(pageDescBySpan.prevY, data.prevY);
+			pageDescBySpan.y = Math.min(pageDescBySpan.y, data.y);
+			let pageDesc = this._getPageBreak(pageBreaks, data.prevPage);
+			if (pageDesc) {
+				this._resolveBreakY(pageDesc, pageDescBySpan, pageDesc);
+			}
+		}
+	};
 
+	/**
+	* Calculates the left offset for a column based on the specified gap values.
+	*
+	* @param {number} i - The index of the column for which the offset is being calculated.
+	* @param {Array<number>} gaps - An array of gap values for each column.
+	* @returns {number} The left offset for the column. Returns `gaps[i]` if it exists, otherwise `0`.
+	*/
+	_colLeftOffset(i, gaps) {
+		if (gaps && gaps.length > i) {
+			return gaps[i];
+		}
+		return 0;
+	}
+
+	/**
+	* Retrieves the ending cell for a row span in case it exists in a specified table column.
+	*
+	* @param {Array<Array<object>>} tableBody - The table body, represented as a 2D array of cell objects.
+	* @param {number} rowIndex - The index of the starting row for the row span.
+	* @param {object} column - The column object containing row span information.
+	* @param {number} columnIndex - The index of the column within the row.
+	* @returns {object|null} The cell at the end of the row span if it exists; otherwise, `null`.
+	* @throws {Error} If the row span extends beyond the total row count.
+	*/
+	_getRowSpanEndingCell(tableBody, rowIndex, column, columnIndex) {
+		if (column.rowSpan && column.rowSpan > 1) {
+			let endingRow = rowIndex + column.rowSpan - 1;
+			if (endingRow >= tableBody.length) {
+				throw new Error(`Row span for column ${columnIndex} (with indexes starting from 0) exceeded row count`);
+			}
+			return tableBody[endingRow][columnIndex];
+		}
+
+		return null;
+	}
+
+	processRow({ marginX = [0, 0], dontBreakRows = false, rowsWithoutPageBreak = 0, cells, widths, gaps, tableNode, tableBody, rowIndex, height, snakingColumns = false }) {
+		const isUnbreakableRow = dontBreakRows || rowIndex <= rowsWithoutPageBreak - 1;
+		const rowContext = this.writer.context();
+		const repeatablesAtRowStart = this.writer.repeatables.length;
 		let pageBreaks = [];
+		let pageBreaksByRowSpan = [];
 		let positions = [];
+		let willBreakByHeight = false;
+		let verticalAlignmentCells = {};
+		widths = widths || cells;
 
-		this.writer.addListener('pageChanged', storePageBreakData);
+		// Check if row should break by height
+		if (!isUnbreakableRow && height > this.writer.context().availableHeight) {
+			willBreakByHeight = true;
+		}
 
-		widths = widths || columns;
+		// Use the marginX if we are in a top level table/column (not nested)
+		const marginXParent = this.nestedLevel === 1 ? marginX : null;
+		const _bottomByPage = tableNode ? tableNode._bottomByPage : null;
+		// Pass column gap and widths to context snapshot for snaking columns
+		// to advance correctly and reset to first-column width on new pages.
+		const columnGapForGroup = (gaps && gaps.length > 1) ? gaps[1] : 0;
+		const columnWidthsForContext = widths.map(w => w._calcWidth);
+		this.writer.context().beginColumnGroup(marginXParent, _bottomByPage,
+			snakingColumns, columnGapForGroup, columnWidthsForContext);
 
-		this.writer.context().beginColumnGroup();
+		// IMPORTANT: We iterate ALL columns even when snakingColumns is enabled.
+		// This is intentional — beginColumn() must be called for each column to set up
+		// proper geometry (widths, offsets) and rowspan/colspan tracking. The
+		// completeColumnGroup() call at the end depends on this bookkeeping to compute
+		// heights correctly. Content processing is skipped for columns > 0 via
+		// skipForSnaking below, but the column structure must still be established.
+		for (let i = 0, l = cells.length; i < l; i++) {
+			let cell = cells[i];
+			let cellIndexBegin = i;
 
-		for (let i = 0, l = columns.length; i < l; i++) {
-			let column = columns[i];
+			// Page change handler
+			const storePageBreakClosure = data => {
+				// Page breaks in a temporary context do not split this row.
+				if (this.writer.context() !== rowContext) {
+					return;
+				}
+				// Each row needs its own break position. Headers belonging to nested
+				// tables are inside this row's borders, unlike its own/ancestor headers.
+				data = { ...data };
+				if (tableNode) {
+					for (let j = repeatablesAtRowStart; j < this.writer.repeatables.length; j++) {
+						data.y -= this.writer.repeatables[j].height;
+					}
+				}
+				const startsRowSpan = cell.rowSpan && cell.rowSpan > 1;
+				if (startsRowSpan) {
+					data.rowSpan = cell.rowSpan;
+				}
+				data.rowIndex = rowIndex;
+				this._storePageBreakData(data, startsRowSpan, pageBreaks, tableNode);
+			};
+
+			this.writer.addListener('pageChanged', storePageBreakClosure);
+
 			let width = widths[i]._calcWidth;
-			let leftOffset = colLeftOffset(i);
+			let leftOffset = this._colLeftOffset(i, gaps);
+			// Check if exists and retrieve the cell that started the rowspan in case we are in the cell just after
+			let startingSpanCell = this._findStartingRowSpanCell(cells, i);
 
-			if (column.colSpan && column.colSpan > 1) {
-				for (let j = 1; j < column.colSpan; j++) {
+			if (cell.colSpan && cell.colSpan > 1) {
+				for (let j = 1; j < cell.colSpan; j++) {
 					width += widths[++i]._calcWidth + gaps[i];
 				}
 			}
 
-			this.writer.context().beginColumn(width, leftOffset, getEndingCell(column, i));
-			if (!column._span) {
-				this.processNode(column);
-				addAll(positions, column.positions);
-			} else if (column._columnEndingContext) {
-				// row-span ending
-				this.writer.context().markEnding(column);
+			// if rowspan starts in this cell, we retrieve the last cell affected by the rowspan
+			const rowSpanRightEndingCell = this._getRowSpanEndingCell(tableBody, rowIndex, cell, i);
+			const rowSpanLeftEndingCell = this._getRowSpanEndingCell(tableBody, rowIndex, cell, cellIndexBegin);
+			if (rowSpanRightEndingCell) {
+				// We store a reference of the ending cell in the first cell of the rowspan
+				cell._endingCell = rowSpanRightEndingCell;
+				cell._endingCell._startingRowSpanY = cell._startingRowSpanY;
+				cell._endingCell._startingRowSpanPage = cell._startingRowSpanPage;
 			}
-		}
-
-		this.writer.context().completeColumnGroup(height);
-
-		this.writer.removeListener('pageChanged', storePageBreakData);
-
-		return { pageBreaks: pageBreaks, positions: positions };
-
-		function colLeftOffset(i) {
-			if (gaps && gaps.length > i) {
-				return gaps[i];
+			if (rowSpanLeftEndingCell) {
+				// We store a reference of the left ending cell in the first cell of the rowspan
+				cell._leftEndingCell = rowSpanLeftEndingCell;
+				cell._leftEndingCell._startingRowSpanY = cell._startingRowSpanY;
+				cell._leftEndingCell._startingRowSpanPage = cell._startingRowSpanPage;
 			}
-			return 0;
-		}
 
-		function getEndingCell(column, columnIndex) {
-			if (column.rowSpan && column.rowSpan > 1) {
-				let endingRow = tableRow + column.rowSpan - 1;
-				if (endingRow >= tableBody.length) {
-					throw new Error(`Row span for column ${columnIndex} (with indexes starting from 0) exceeded row count`);
+			// If we are after a cell that started a rowspan
+			let endOfRowSpanCell = null;
+			if (startingSpanCell && startingSpanCell._endingCell) {
+				// Reference to the last cell of the rowspan
+				endOfRowSpanCell = startingSpanCell._endingCell;
+				// Store if we are in an unbreakable block when we save the context and the originalX
+				if (this.writer.transactionLevel > 0) {
+					endOfRowSpanCell._isUnbreakableContext = true;
+					endOfRowSpanCell._originalXOffset = this.writer.originalX;
 				}
-				return tableBody[endingRow][columnIndex];
 			}
 
-			return null;
+			// We pass the endingSpanCell reference to store the context just after processing rowspan cell
+			this.writer.context().beginColumn(width, leftOffset, endOfRowSpanCell);
+
+			// When snaking, only process content from the first column (i === 0).
+			// Content overflows into subsequent columns via moveToNextColumn().
+			// We skip content processing here but NOT the beginColumn() call above —
+			// the column geometry setup is still needed for proper layout bookkeeping.
+			const skipForSnaking = snakingColumns && i > 0;
+
+			if (!cell._span && !skipForSnaking) {
+				this.processNode(cell, true);
+				this.writer.context().updateBottomByPage();
+
+				if (cell.verticalAlignment) {
+					verticalAlignmentCells[cellIndexBegin] = this.verticalAlignmentItemStack.length - 1;
+				}
+
+				addAll(positions, cell.positions);
+			} else if (cell._columnEndingContext) {
+				let discountY = 0;
+				if (dontBreakRows) {
+					// Calculate how many points we have to discount to Y when dontBreakRows and rowSpan are combined
+					const ctxBeforeRowSpanLastRow = this.writer.contextStack[this.writer.contextStack.length - 1];
+					const startsOnCurrentPage = (
+						typeof cell._startingRowSpanPage === 'number' &&
+						cell._startingRowSpanPage === ctxBeforeRowSpanLastRow.page
+					);
+
+					if (startsOnCurrentPage && typeof cell._startingRowSpanY === 'number') {
+						discountY = ctxBeforeRowSpanLastRow.y - cell._startingRowSpanY;
+					}
+
+					// Do not increase Y by applying a negative discount.
+					discountY = Math.max(0, discountY);
+				}
+				let originalXOffset = 0;
+				// If context was saved from an unbreakable block and we are not in an unbreakable block anymore
+				// We have to sum the originalX (X before starting unbreakable block) to X
+				if (cell._isUnbreakableContext && !this.writer.transactionLevel) {
+					originalXOffset = cell._originalXOffset;
+				}
+				// row-span ending
+				// Recover the context after processing the rowspanned cell
+				this.writer.context().markEnding(cell, originalXOffset, discountY);
+			}
+			this.writer.removeListener('pageChanged', storePageBreakClosure);
 		}
+
+		// Check if last cell is part of a span
+		let endingSpanCell = null;
+		const lastColumn = cells.length > 0 ? cells[cells.length - 1] : null;
+		if (lastColumn) {
+			// Previous column cell has a rowspan
+			if (lastColumn._endingCell) {
+				endingSpanCell = lastColumn._endingCell;
+				// Previous column cell is part of a span
+			} else if (lastColumn._span === true) {
+				// We get the cell that started the span where we set a reference to the ending cell
+				const startingSpanCell = this._findStartingRowSpanCell(cells, cells.length);
+				if (startingSpanCell) {
+					// Context will be stored here (ending cell)
+					endingSpanCell = startingSpanCell._endingCell;
+					// Store if we are in an unbreakable block when we save the context and the originalX
+					if (this.writer.transactionLevel > 0) {
+						endingSpanCell._isUnbreakableContext = true;
+						endingSpanCell._originalXOffset = this.writer.originalX;
+					}
+				}
+			}
+		}
+
+		// If content did not break page, check if we should break by height
+		if (willBreakByHeight && !isUnbreakableRow && pageBreaks.length === 0) {
+			this.writer.context().moveDown(this.writer.context().availableHeight);
+			if (snakingColumns) {
+				this.snakingAwarePageBreak();
+			} else {
+				this.writer.moveToNextPage();
+			}
+		}
+
+		const bottomByPage = this.writer.context().completeColumnGroup(height, endingSpanCell);
+
+		if (tableNode) {
+			tableNode._bottomByPage = bottomByPage;
+			// If there are page breaks in this row, update data with prevY of last cell
+			this._updatePageBreaksData(pageBreaks, tableNode, rowIndex);
+		}
+
+		let rowHeight = this.writer.context().height;
+		for (let i = 0, l = cells.length; i < l; i++) {
+			let cell = cells[i];
+			if (!cell._span && cell.verticalAlignment) {
+				let itemBegin = this.verticalAlignmentItemStack[verticalAlignmentCells[i]].begin.item;
+				itemBegin.viewHeight = rowHeight;
+				itemBegin.nodeHeight = cell.__height;
+				itemBegin.cell = cell;
+				itemBegin.bottomY = this.writer.context().y;
+				itemBegin.isCellContentMultiPage = !itemBegin.cell.positions.every(item => item.pageNumber === itemBegin.cell.positions[0].pageNumber);
+				itemBegin.getViewHeight = function () {
+					if (this.cell._willBreak) {
+						return this.cell._bottomY - this.cell._rowTopPageY;
+					}
+
+					if (this.cell.rowSpan && this.cell.rowSpan > 1) {
+						if (dontBreakRows) {
+							let rowTopPageY = this.cell._leftEndingCell._startingRowSpanY + this.cell._leftEndingCell._rowTopPageYPadding;
+							return this.cell._leftEndingCell._rowTopPageY - rowTopPageY + this.cell._leftEndingCell._bottomY;
+						} else {
+							if (this.cell._lastPageNumber !== this.cell._leftEndingCell._lastPageNumber) {
+								return this.bottomY - this.cell._leftEndingCell._bottomY;
+							}
+
+							return this.viewHeight + this.cell._leftEndingCell._bottomY - this.bottomY;
+						}
+					}
+
+					return this.viewHeight;
+				};
+				itemBegin.getNodeHeight = function () {
+					return this.nodeHeight;
+				};
+
+				let itemEnd = this.verticalAlignmentItemStack[verticalAlignmentCells[i]].end.item;
+				itemEnd.isCellContentMultiPage = itemBegin.isCellContentMultiPage;
+			}
+		}
+
+		return {
+			pageBreaksBySpan: pageBreaksByRowSpan,
+			pageBreaks: pageBreaks,
+			positions: positions
+		};
 	}
 
 	// lists
 	processList(orderedList, node) {
+		const backgroundLevel = this.backgroundLevel;
 		const addMarkerToFirstLeaf = line => {
 			// I'm not very happy with the way list processing is implemented
 			// (both code and algorithm should be rethinked)
-			if (nextMarker) {
+			// Background lines must only consume markers from lists in that background.
+			if (nextMarker && this.backgroundLevel === backgroundLevel) {
 				let marker = nextMarker;
 				nextMarker = null;
 
@@ -617,12 +1190,61 @@ class LayoutBuilder {
 
 	// tables
 	processTable(tableNode) {
+		// Page breaks and row bottoms belong to the current layout pass only.
+		delete tableNode._bottomByPage;
+		delete tableNode._breaksBySpan;
+		tableNode.table.body.forEach(row => row.forEach(cell => {
+			delete cell._willBreak;
+			delete cell._bottomY;
+		}));
+
+		this.nestedLevel++;
 		let processor = new TableProcessor(tableNode);
 
 		processor.beginTable(this.writer);
 
 		let rowHeights = tableNode.table.heights;
+		let lastRowHeight = 0;
+
 		for (let i = 0, l = tableNode.table.body.length; i < l; i++) {
+			// Between table rows: check if we should move to the next snaking column.
+			// This must happen AFTER the previous row's endRow (borders drawn) and
+			// BEFORE this row's beginRow. At this point, the table row column group
+			// has been completed, so canMoveToNextColumn() works correctly.
+			if (i > 0 && this.writer.context().inSnakingColumns()) {
+				// Estimate minimum space for next row: use last row's height as heuristic,
+				// or fall back to a minimum of padding + line height + border
+				let minRowHeight = lastRowHeight > 0 ? lastRowHeight : (
+					processor.rowPaddingTop + 14 + processor.rowPaddingBottom +
+					processor.bottomLineWidth + processor.topLineWidth
+				);
+				if (this.writer.context().availableHeight < minRowHeight) {
+					// Column selection needs the container origin, before table alignment.
+					if (processor.alignmentOffset) {
+						this.writer.context().addMargin(-processor.alignmentOffset, processor.alignmentOffset);
+					}
+					this.snakingAwarePageBreak(undefined, processor);
+
+					// Skip border when headerRows present (header repeat includes it)
+					if (processor.layout.hLineWhenBroken !== false && !processor.headerRows) {
+						processor.drawHorizontalLine(i, this.writer);
+					}
+				}
+			}
+
+			let rowYBefore = this.writer.context().y;
+
+			// if dontBreakRows and row starts a rowspan
+			// we store the 'y' of the beginning of each rowSpan
+			if (processor.dontBreakRows) {
+				tableNode.table.body[i].forEach(cell => {
+					if (cell.rowSpan && cell.rowSpan > 1) {
+						cell._startingRowSpanY = this.writer.context().y;
+						cell._startingRowSpanPage = this.writer.context().page;
+					}
+				});
+			}
+
 			processor.beginRow(i, this.writer);
 
 			let height;
@@ -638,13 +1260,46 @@ class LayoutBuilder {
 				height = undefined;
 			}
 
-			let result = this.processRow(tableNode.table.body[i], tableNode.table.widths, tableNode._offsets.offsets, tableNode.table.body, i, height);
+			const pageBeforeProcessing = this.writer.context().page;
+
+			let result = this.processRow({
+				marginX: tableNode._margin ? [tableNode._margin[0], tableNode._margin[2]] : [0, 0],
+				dontBreakRows: processor.dontBreakRows,
+				rowsWithoutPageBreak: processor.rowsWithoutPageBreak,
+				cells: tableNode.table.body[i],
+				widths: tableNode.table.widths,
+				gaps: tableNode._offsets.offsets,
+				tableBody: tableNode.table.body,
+				tableNode,
+				rowIndex: i,
+				height
+			});
+
 			addAll(tableNode.positions, result.positions);
 
+			if (!result.pageBreaks || result.pageBreaks.length === 0) {
+				const breaksBySpan = tableNode && tableNode._breaksBySpan || null;
+				const breakBySpanData = this._findSameRowPageBreakByRowSpanData(breaksBySpan, pageBeforeProcessing, i);
+				if (breakBySpanData) {
+					const finalBreakBySpanData = this._getPageBreakListBySpan(tableNode, breakBySpanData.prevPage, i);
+					result.pageBreaks.push(finalBreakBySpanData);
+				}
+			}
+
 			processor.endRow(i, this.writer, result.pageBreaks);
+
+			// Track the height of the completed row for the next row's estimate
+			let rowYAfter = this.writer.context().y;
+			if (this.writer.context().page === pageBeforeProcessing) {
+				lastRowHeight = rowYAfter - rowYBefore;
+			}
 		}
 
 		processor.endTable(this.writer);
+		this.nestedLevel--;
+		if (this.nestedLevel === 0) {
+			this.writer.context().resetMarginXTopParent();
+		}
 	}
 
 	// leafs (texts)
@@ -660,6 +1315,27 @@ class LayoutBuilder {
 			let nodeId = getNodeId(node);
 			if (nodeId) {
 				line.id = nodeId;
+			}
+		}
+
+		if (node.outline) {
+			line._outline = {
+				id: node.id,
+				parentId: node.outlineParentId,
+				text: node.outlineText || node.text,
+				expanded: node.outlineExpanded || false
+			};
+		} else if (Array.isArray(node.text)) {
+			for (let i = 0, l = node.text.length; i < l; i++) {
+				let item = node.text[i];
+				if (item.outline) {
+					line._outline = {
+						id: item.id,
+						parentId: item.outlineParentId,
+						text: item.outlineText || item.text,
+						expanded: item.outlineExpanded || false
+					};
+				}
 			}
 		}
 
@@ -684,6 +1360,28 @@ class LayoutBuilder {
 		}
 
 		while (line && (maxHeight === -1 || currentHeight < maxHeight)) {
+			// Check if line fits vertically in current context
+			if (line.getHeight() > this.writer.context().availableHeight && this.writer.context().y > this.writer.context().pageMargins.top) {
+				// Line doesn't fit, forced move to next page/column
+				// Only do snaking-specific break if we're in snaking columns AND NOT inside
+				// a nested non-snaking group (like a table row). Table cells should use
+				// standard page breaks — column breaks happen between table rows instead.
+				if (this.writer.context().inSnakingColumns() && !this.writer.context().isInNestedNonSnakingGroup()) {
+					this.snakingAwarePageBreak(node.pageOrientation);
+
+					// Always reflow text after a snaking break (column or page).
+					// This ensures text adapts to the new column width, whether it's narrower or wider.
+					if (line.inlines && line.inlines.length > 0) {
+						node._inlines.unshift(...line.inlines);
+					}
+					// Rebuild line with new width
+					line = this.buildNextLine(node);
+					continue;
+				} else {
+					this.writer.moveToNextPage(node.pageOrientation);
+				}
+			}
+
 			let positions = this.writer.addLine(line);
 			node.positions.push(positions);
 			line = this.buildNextLine(node);
@@ -694,6 +1392,10 @@ class LayoutBuilder {
 	}
 
 	processToc(node) {
+		if (!node.toc._table && node.toc.hideEmpty === true) {
+			return;
+		}
+
 		if (node.toc.title) {
 			this.processNode(node.toc.title);
 		}
@@ -712,6 +1414,27 @@ class LayoutBuilder {
 			return newInline;
 		}
 
+		function findMaxFitLength(text, maxWidth, measureFn) {
+			let low = 1;
+			let high = text.length;
+			let bestFit = 1;
+
+			while (low <= high) {
+				const mid = Math.floor((low + high) / 2);
+				const part = text.substring(0, mid);
+				const width = measureFn(part);
+
+				if (width <= maxWidth) {
+					bestFit = mid;
+					low = mid + 1;
+				} else {
+					high = mid - 1;
+				}
+			}
+
+			return bestFit;
+		}
+
 		if (!textNode._inlines || textNode._inlines.length === 0) {
 			return null;
 		}
@@ -724,14 +1447,11 @@ class LayoutBuilder {
 			(line.hasEnoughSpaceForInline(textNode._inlines[0], textNode._inlines.slice(1)) || isForceContinue)) {
 			let isHardWrap = false;
 			let inline = textNode._inlines.shift();
-			isForceContinue = false;
 
 			if (!inline.noWrap && inline.text.length > 1 && inline.width > line.getAvailableWidth()) {
-				let widthPerChar = inline.width / inline.text.length;
-				let maxChars = Math.floor(line.getAvailableWidth() / widthPerChar);
-				if (maxChars < 1) {
-					maxChars = 1;
-				}
+				let maxChars = findMaxFitLength(inline.text, line.getAvailableWidth(), (txt) =>
+					textInlines.widthOfText(txt, inline)
+				);
 				if (maxChars < inline.text.length) {
 					let newInline = cloneInline(inline);
 
@@ -796,6 +1516,7 @@ function decorateNode(node) {
 			let y1 = vector.y1;
 			let x2 = vector.x2;
 			let y2 = vector.y2;
+			let points = vector.type === 'polyline' ? vector.points.map(point => ({ x: point.x, y: point.y })) : null;
 			vector.resetXY = () => {
 				vector.x = x;
 				vector.y = y;
@@ -803,6 +1524,12 @@ function decorateNode(node) {
 				vector.y1 = y1;
 				vector.x2 = x2;
 				vector.y2 = y2;
+				if (points) {
+					points.forEach((point, index) => {
+						vector.points[index].x = point.x;
+						vector.points[index].y = point.y;
+					});
+				}
 			};
 		});
 	}

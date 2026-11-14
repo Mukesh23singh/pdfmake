@@ -5,6 +5,7 @@ var sinon = require('sinon');
 
 var DocumentContext = require('../../js/DocumentContext').default;
 var PageElementWriter = require('../../js/PageElementWriter').default;
+var originalEmit = PageElementWriter.prototype.emit;
 
 describe('PageElementWriter', function () {
 	var pew, ctx, pageSize;
@@ -100,11 +101,15 @@ describe('PageElementWriter', function () {
 
 	beforeEach(function () {
 		pageSize = { width: DOCUMENT_WIDTH, height: DOCUMENT_HEIGHT, orientation: DOCUMENT_ORIENTATION };
-		ctx = new DocumentContext(pageSize, MARGINS);
-
-		PageElementWriter.prototype.emit = sinon.spy(PageElementWriter.prototype.emit);
+		ctx = new DocumentContext();
+		ctx.addPage(pageSize, MARGINS);
 
 		pew = new PageElementWriter(ctx);
+		sinon.spy(pew, 'emit');
+	});
+
+	afterEach(function () {
+		pew.emit.restore();
 	});
 
 	describe('addLine', function () {
@@ -192,6 +197,20 @@ describe('PageElementWriter', function () {
 	});
 
 	describe('beginUnbreakableBlock', function () {
+		it('should paginate the transaction using the full page height excluding margins', function () {
+			addOneTenthLines(8);
+			pew.beginUnbreakableBlock();
+			addOneTenthLines(11);
+
+			var transactionCtx = pew.context();
+			assert.equal(transactionCtx.pages.length, 2);
+			assert.equal(transactionCtx.pages[0].items.length, 10);
+			assert.equal(transactionCtx.pages[1].items.length, 1);
+			assert.equal(transactionCtx.availableHeight, AVAILABLE_HEIGHT * 0.9);
+			assert.equal(ctx.pages.length, 1);
+			assert.equal(ctx.pages[0].items.length, 8);
+		});
+
 		it('should begin a new transaction only once', function () {
 			assert(pew.transactionLevel === 0);
 			pew.beginUnbreakableBlock();
@@ -347,7 +366,26 @@ describe('PageElementWriter', function () {
 		});
 
 		it('should add a repeatable fragment to the top when reusing page only once', function () {
-			// TODO
+			var repeatable = createRepeatable('header', 50);
+			pew.pushToRepeatables(repeatable);
+			ctx.beginColumnGroup();
+			ctx.beginColumn(200);
+			addOneTenthLines(11);
+			assert.equal(ctx.page, 1);
+			assert.equal(ctx.y, MARGINS.top + 50 + 100);
+
+			// The second column revisits the same page after overflowing independently.
+			ctx.beginColumn(200);
+			addOneTenthLines(11);
+			assert.equal(ctx.pages.length, 2);
+			var headers = ctx.pages[1].items.filter(item => item.item.marker === 'header');
+			assert.equal(headers.length, 1);
+			assert.equal(headers[0].item.y, MARGINS.top);
+			var lines = ctx.pages[1].items.filter(item => !item.item.marker);
+			assert.equal(lines.length, 2);
+			assert.deepEqual(lines.map(item => item.item.y), [MARGINS.top + 50, MARGINS.top + 50]);
+			assert.deepEqual(lines.map(item => item.item.x), [MARGINS.left, MARGINS.left + 200]);
+			assert.equal(ctx.y, MARGINS.top + 50 + 100);
 		});
 
 		it('should add repeatable fragments in the same order they have been added to the repeatable fragments collection', function () {
@@ -433,5 +471,13 @@ describe('PageElementWriter', function () {
 			assert.equal(pew.emit.callCount, 2);
 			assert.deepEqual(pew.emit.getCall(1).args, ['pageChanged', { prevPage: 0, prevY: MARGINS.top + AVAILABLE_HEIGHT / 10, y: MARGINS.top }]);
 		});
+	});
+});
+
+describe('PageElementWriter test isolation', function () {
+	it('leaves emit unchanged for subsequent writers', function () {
+		assert.strictEqual(PageElementWriter.prototype.emit, originalEmit);
+		var writer = new PageElementWriter(new DocumentContext());
+		assert.strictEqual(writer.emit, originalEmit);
 	});
 });

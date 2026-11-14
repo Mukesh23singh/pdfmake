@@ -1,4 +1,6 @@
-const groupDecorations = line => {
+import { isNumber } from './helpers/variableType';
+
+const groupDecorations = (line, pdfDocument) => {
 	let groups = [];
 	let currentGroup = null;
 	for (let i = 0, l = line.inlines.length; i < l; i++) {
@@ -11,18 +13,21 @@ const groupDecorations = line => {
 		if (!Array.isArray(decoration)) {
 			decoration = [decoration];
 		}
-		let color = inline.decorationColor || inline.color || 'black';
+		let color = pdfDocument.resolveColor(pdfDocument.resolveColor(inline.decorationColor, inline.color), 'black');
 		let style = inline.decorationStyle || 'solid';
+		let thickness = isNumber(inline.decorationThickness) ? inline.decorationThickness : null;
 		for (let ii = 0, ll = decoration.length; ii < ll; ii++) {
 			let decorationItem = decoration[ii];
 			if (!currentGroup || decorationItem !== currentGroup.decoration ||
-				style !== currentGroup.decorationStyle || color !== currentGroup.decorationColor) {
+				style !== currentGroup.decorationStyle || color !== currentGroup.decorationColor ||
+				thickness !== currentGroup.decorationThickness) {
 
 				currentGroup = {
 					line: line,
 					decoration: decorationItem,
 					decorationColor: color,
 					decorationStyle: style,
+					decorationThickness: thickness,
 					inlines: [inline]
 				};
 				groups.push(currentGroup);
@@ -45,25 +50,40 @@ class TextDecorator {
 		let height = line.getHeight();
 		for (let i = 0, l = line.inlines.length; i < l; i++) {
 			let inline = line.inlines[i];
-			if (!inline.background) {
+
+			let color = this.pdfDocument.resolveColor(inline.background, undefined);
+			if (!color) {
 				continue;
 			}
 
-			let color = inline.background;
 			let patternColor = this.pdfDocument.providePattern(inline.background);
 			if (patternColor !== null) {
 				color = patternColor;
 			}
 
 			let justifyShift = (inline.justifyShift || 0);
+			let rectX = x + inline.x - justifyShift;
+			let rectWidth = inline.width + justifyShift;
+
+			let lineStart = x + Math.min(0, line.inlines[0].leadingIndent || 0);
+			if (line.leadingCut > 0 && rectX < lineStart) {
+				// Clip the background of trimmed whitespace at the line start,
+				// keeping any negative leading indent used by the visible text.
+				rectWidth = rectX + rectWidth - lineStart;
+				rectX = lineStart;
+				if (rectWidth <= 0) {
+					continue;
+				}
+			}
+
 			this.pdfDocument.fillColor(color)
-				.rect(x + inline.x - justifyShift, y, inline.width + justifyShift, height)
+				.rect(rectX, y, rectWidth, height)
 				.fill();
 		}
 	}
 
 	drawDecorations(line, x, y) {
-		let groups = groupDecorations(line);
+		let groups = groupDecorations(line, this.pdfDocument);
 		for (let i = 0, l = groups.length; i < l; i++) {
 			this._drawDecoration(groups[i], x, y);
 		}
@@ -74,7 +94,7 @@ class TextDecorator {
 			let max = 0;
 			for (let i = 0, l = group.inlines.length; i < l; i++) {
 				let inline = group.inlines[i];
-				max = inline.fontSize > max ? i : max;
+				max = inline.fontSize > group.inlines[max].fontSize ? i : max;
 			}
 			return group.inlines[max];
 		};
@@ -96,7 +116,9 @@ class TextDecorator {
 		let height = biggerInline.height;
 		let descent = height - ascent;
 
-		let lw = 0.5 + Math.floor(Math.max(biggerInline.fontSize - 8, 0) / 2) * 0.12;
+		let lw = isNumber(group.decorationThickness)
+			? group.decorationThickness
+			: 0.5 + Math.floor(Math.max(biggerInline.fontSize - 8, 0) / 2) * 0.12;
 
 		switch (group.decoration) {
 			case 'underline':
@@ -109,12 +131,20 @@ class TextDecorator {
 				y += lineAscent - (ascent * 0.25);
 				break;
 			default:
-				throw new Error(`Unkown decoration : ${group.decoration}`);
+				throw new Error(`Unknown decoration : ${group.decoration}`);
 		}
+
+		if (group.inlines[0].sup) {
+			y -= group.inlines[0].fontSize * 0.75;
+		}
+		if (group.inlines[0].sub) {
+			y += group.inlines[0].fontSize * 0.35;
+		}
+
 		this.pdfDocument.save();
 
 		if (group.decorationStyle === 'double') {
-			let gap = Math.max(0.5, lw * 2);
+			let gap = Math.max(0.5, lw, biggerInline.fontSize * 0.15);
 			this.pdfDocument.fillColor(group.decorationColor)
 				.rect(x + firstInline.x, y - lw / 2, totalWidth, lw / 2).fill()
 				.rect(x + firstInline.x, y + gap - lw / 2, totalWidth, lw / 2).fill();
@@ -140,8 +170,8 @@ class TextDecorator {
 			let sh = 0.7, sv = 1;
 			let nbWaves = Math.ceil(totalWidth / (sh * 2)) + 1;
 			let rwx = x + firstInline.x - 1;
-			this.pdfDocument.rect(x + firstInline.x, y - sv, totalWidth, y + sv).clip();
-			this.pdfDocument.lineWidth(0.24);
+			this.pdfDocument.rect(x + firstInline.x, y - sv, totalWidth, 2 * sv).clip();
+			this.pdfDocument.lineWidth(lw / 3);
 			this.pdfDocument.moveTo(rwx, y);
 			for (let i = 0; i < nbWaves; i++) {
 				this.pdfDocument.bezierCurveTo(rwx + sh, y - sv, rwx + sh * 2, y - sv, rwx + sh * 3, y)

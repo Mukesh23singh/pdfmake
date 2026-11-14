@@ -1,4 +1,6 @@
-import PDFKit from '@foliojs-fork/pdfkit';
+import { PDFDocument as PDFKitDocument } from 'pdfkit';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { isString } from './helpers/variableType';
 
 const typeName = (bold, italics) => {
 	let type = 'normal';
@@ -12,9 +14,10 @@ const typeName = (bold, italics) => {
 	return type;
 };
 
-class PDFDocument extends PDFKit {
-	constructor(fonts = {}, images = {}, patterns = {}, attachments = {}, options = {}, virtualfs = null) {
+class PDFDocument extends PDFKitDocument {
+	constructor(fonts = {}, images = {}, patterns = {}, attachments = {}, options = {}, virtualfs = null, localAccessPolicy = undefined) {
 		super(options);
+		this.imageCache = new Map();
 
 		this.fonts = {};
 		this.fontCache = {};
@@ -39,10 +42,10 @@ class PDFDocument extends PDFKit {
 			}
 		}
 
-
 		this.images = images;
 		this.attachments = attachments;
 		this.virtualfs = virtualfs;
+		this.localAccessPolicy = localAccessPolicy;
 	}
 
 	getFontType(bold, italics) {
@@ -70,10 +73,18 @@ class PDFDocument extends PDFKit {
 			let def = this.fonts[familyName][type];
 			if (!Array.isArray(def)) {
 				def = [def];
+			} else {
+				def = def.slice();
+			}
+
+			if (typeof def[0] === 'object' && def[0].url) {
+				def[0] = def[0].url;
 			}
 
 			if (this.virtualfs && this.virtualfs.existsSync(def[0])) {
 				def[0] = this.virtualfs.readFileSync(def[0]);
+			} else {
+				this.validateLocalFile(def[0]);
 			}
 
 			this.fontCache[familyName][type] = this.font(...def)._font;
@@ -84,41 +95,61 @@ class PDFDocument extends PDFKit {
 
 	provideImage(src) {
 		const realImageSrc = src => {
-			let image = this.images[src];
+			let image = this.images[src] || src;
 
-			if (!image) {
-				return src;
+			if (typeof image === 'object' && image.url) {
+				image = image.url;
 			}
 
 			if (this.virtualfs && this.virtualfs.existsSync(image)) {
 				return this.virtualfs.readFileSync(image);
 			}
 
+			if (typeof image !== 'string') {
+				return image;
+			}
+
 			let index = image.indexOf('base64,');
 			if (index < 0) {
-				return this.images[src];
+				return image;
 			}
 
 			return Buffer.from(image.substring(index + 7), 'base64');
 		};
 
-		if (this._imageRegistry[src]) {
+		if (typeof src === 'string' && this._imageRegistry[src]) {
 			return this._imageRegistry[src];
 		}
 
 		let image;
+		let hash;
+
+		let imageSrc = realImageSrc(src);
+
+		this.validateLocalFile(imageSrc);
 
 		try {
-			image = this.openImage(realImageSrc(src));
+			if (typeof imageSrc !== 'string') {
+				const data = imageSrc instanceof ArrayBuffer ? new Uint8Array(imageSrc) : imageSrc;
+				hash = Buffer.from(sha256(data)).toString('base64');
+			}
+			image = this.imageCache.get(hash) || this.openImage(imageSrc);
 			if (!image) {
 				throw new Error('No image');
 			}
 		} catch (error) {
-			throw new Error(`Invalid image: ${error.toString()}\nImages dictionary should contain dataURL entries (or local file paths in node.js)`);
+			throw new Error(`Invalid image: ${error.toString()}\nImages dictionary should contain dataURL entries (or local file paths in node.js)`, { cause: error });
 		}
 
-		image.embed(this);
-		this._imageRegistry[src] = image;
+		if (!image.obj) {
+			image.embed(this);
+		}
+		if (hash) {
+			this.imageCache.set(hash, image);
+		}
+		if (typeof src === 'string') {
+			this._imageRegistry[src] = image;
+		}
 
 		return image;
 	}
@@ -147,17 +178,34 @@ class PDFDocument extends PDFKit {
 			return obj;
 		};
 
-		if (typeof src === 'object') {
-			return checkRequired(src);
-		}
+		let attachment = checkRequired(typeof src === 'object' ? src : this.attachments[src]);
 
-		let attachment = checkRequired(this.attachments[src]);
+		if (typeof attachment.src === 'object' && attachment.src.url) {
+			attachment = { ...attachment, src: attachment.src.url };
+		}
 
 		if (this.virtualfs && this.virtualfs.existsSync(attachment.src)) {
-			return this.virtualfs.readFileSync(attachment.src);
+			return {
+				...attachment,
+				src: this.virtualfs.readFileSync(attachment.src)
+			};
 		}
 
+		this.validateLocalFile(attachment.src);
+
 		return attachment;
+	}
+
+	resolveColor(color, defaultColor) {
+		color = color || defaultColor;
+
+		if (typeof this._normalizeColor === 'function') {
+			if (isString(color) && this._normalizeColor(color) === null) { // color is not valid
+				return defaultColor;
+			}
+		}
+
+		return color;
 	}
 
 	setOpenActionAsPrint() {
@@ -168,6 +216,30 @@ class PDFDocument extends PDFKit {
 		});
 		this._root.data.OpenAction = printActionRef;
 		printActionRef.end();
+	}
+
+	file(src, options = {}) {
+		this.validateLocalFile(src);
+
+		return super.file(src, options);
+	}
+
+	validateLocalFile(path) {
+		if (typeof this.localAccessPolicy === 'undefined') {
+			return;
+		}
+
+		if (!isString(path)) {
+			return;
+		}
+
+		if (/^data:/.test(path)) {
+			return;
+		}
+
+		if (this.localAccessPolicy(path) !== true) {
+			throw new Error(`Access to local file denied by resource access policy: ${path}`);
+		}
 	}
 }
 

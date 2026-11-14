@@ -5,33 +5,23 @@ import { normalizePageSize, normalizePageMargin } from './PageSize';
 import { tableLayouts } from './tableLayouts';
 import Renderer from './Renderer';
 import { isNumber, isValue } from './helpers/variableType';
+import { convertToDynamicContent } from './helpers/tools';
 
-/**
- * Printer which turns document definition into a pdf
- *
- * @example
- * var fontDescriptors = {
- *	Roboto: {
- *		normal: 'fonts/Roboto-Regular.ttf',
- *		bold: 'fonts/Roboto-Medium.ttf',
- *		italics: 'fonts/Roboto-Italic.ttf',
- *		bolditalics: 'fonts/Roboto-MediumItalic.ttf'
- *	}
- * };
- *
- * var printer = new PdfPrinter(fontDescriptors);
- */
 class PdfPrinter {
 
 	/**
 	 * @param {object} fontDescriptors font definition dictionary
 	 * @param {object} virtualfs
 	 * @param {object} urlResolver
+	 * @param {(path: string) => boolean} localAccessPolicy
+	 * @param {boolean} urlResourceCaching
 	 */
-	constructor(fontDescriptors, virtualfs = null, urlResolver = null) {
+	constructor(fontDescriptors, virtualfs, urlResolver, localAccessPolicy, urlResourceCaching = false) {
 		this.fontDescriptors = fontDescriptors;
 		this.virtualfs = virtualfs;
 		this.urlResolver = urlResolver;
+		this.localAccessPolicy = localAccessPolicy;
+		this.urlResourceCaching = urlResourceCaching;
 	}
 
 	/**
@@ -42,172 +32,159 @@ class PdfPrinter {
 	 * @param {object} options
 	 * @returns {Promise<PDFDocument>} resolved promise return a pdfkit document
 	 */
-	createPdfKitDocument(docDefinition, options = {}) {
-		return new Promise((resolve, reject) => {
-			this.resolveUrls(docDefinition).then(() => {
-				try {
-					docDefinition.version = docDefinition.version || '1.3';
-					docDefinition.compress = typeof docDefinition.compress === 'boolean' ? docDefinition.compress : true;
-					docDefinition.images = docDefinition.images || {};
-					docDefinition.attachments = docDefinition.attachments || {};
-					docDefinition.pageMargins = isValue(docDefinition.pageMargins) ? docDefinition.pageMargins : 40;
-					docDefinition.patterns = docDefinition.patterns || {};
+	async createPdfKitDocument(docDefinition, options = {}) {
+		await this.resolveUrls(docDefinition);
 
-					let pageSize = normalizePageSize(docDefinition.pageSize, docDefinition.pageOrientation);
+		docDefinition.version = docDefinition.version || '1.3';
+		docDefinition.subset = docDefinition.subset || undefined;
+		docDefinition.tagged = typeof docDefinition.tagged === 'boolean' ? docDefinition.tagged : false;
+		docDefinition.displayTitle = typeof docDefinition.displayTitle === 'boolean' ? docDefinition.displayTitle : false;
+		docDefinition.compress = typeof docDefinition.compress === 'boolean' ? docDefinition.compress : true;
+		docDefinition.images = docDefinition.images || {};
+		docDefinition.attachments = docDefinition.attachments || {};
+		docDefinition.pageMargins = isValue(docDefinition.pageMargins) ? docDefinition.pageMargins : 40;
+		docDefinition.patterns = docDefinition.patterns || {};
 
-					let pdfOptions = {
-						size: [pageSize.width, pageSize.height],
-						pdfVersion: docDefinition.version,
-						compress: docDefinition.compress,
-						userPassword: docDefinition.userPassword,
-						ownerPassword: docDefinition.ownerPassword,
-						permissions: docDefinition.permissions,
-						fontLayoutCache: typeof options.fontLayoutCache === 'boolean' ? options.fontLayoutCache : true,
-						bufferPages: options.bufferPages || false,
-						autoFirstPage: false,
-						info: createMetadata(docDefinition),
-						font: null
-					};
+		if (docDefinition.header && typeof docDefinition.header !== 'function') {
+			docDefinition.header = convertToDynamicContent(docDefinition.header);
+		}
 
-					this.pdfKitDoc = new PDFDocument(this.fontDescriptors, docDefinition.images, docDefinition.patterns, docDefinition.attachments, pdfOptions, this.virtualfs);
-					embedFiles(docDefinition, this.pdfKitDoc);
+		if (docDefinition.footer && typeof docDefinition.footer !== 'function') {
+			docDefinition.footer = convertToDynamicContent(docDefinition.footer);
+		}
 
-					const builder = new LayoutBuilder(pageSize, normalizePageMargin(docDefinition.pageMargins), new SVGMeasure());
+		let pageSize = normalizePageSize(docDefinition.pageSize, docDefinition.pageOrientation);
 
-					builder.registerTableLayouts(tableLayouts);
-					if (options.tableLayouts) {
-						builder.registerTableLayouts(options.tableLayouts);
-					}
+		let pdfOptions = {
+			size: [pageSize.width, pageSize.height],
+			pdfVersion: docDefinition.version,
+			subset: docDefinition.subset,
+			tagged: docDefinition.tagged,
+			displayTitle: docDefinition.displayTitle,
+			compress: docDefinition.compress,
+			userPassword: docDefinition.userPassword,
+			ownerPassword: docDefinition.ownerPassword,
+			permissions: docDefinition.permissions,
+			lang: docDefinition.language,
+			fontLayoutCache: typeof options.fontLayoutCache === 'boolean' ? options.fontLayoutCache : true,
+			bufferPages: options.bufferPages || false,
+			autoFirstPage: false,
+			info: createMetadata(docDefinition),
+			font: null
+		};
 
-					let pages = builder.layoutDocument(docDefinition.content, this.pdfKitDoc, docDefinition.styles || {}, docDefinition.defaultStyle || { fontSize: 12, font: 'Roboto' }, docDefinition.background, docDefinition.header, docDefinition.footer, docDefinition.watermark, docDefinition.pageBreakBefore);
-					let maxNumberPages = docDefinition.maxPagesNumber || -1;
-					if (isNumber(maxNumberPages) && maxNumberPages > -1) {
-						pages = pages.slice(0, maxNumberPages);
-					}
+		this.pdfKitDoc = new PDFDocument(this.fontDescriptors, docDefinition.images, docDefinition.patterns, docDefinition.attachments, pdfOptions, this.virtualfs, this.localAccessPolicy);
+		embedFiles(docDefinition, this.pdfKitDoc);
 
-					// if pageSize.height is set to Infinity, calculate the actual height of the page that
-					// was laid out using the height of each of the items in the page.
-					if (pageSize.height === Infinity) {
-						let pageHeight = calculatePageHeight(pages, docDefinition.pageMargins);
-						this.pdfKitDoc.options.size = [pageSize.width, pageHeight];
-					}
+		const builder = new LayoutBuilder(pageSize, normalizePageMargin(docDefinition.pageMargins), new SVGMeasure());
 
-					const renderer = new Renderer(this.pdfKitDoc, options.progressCallback);
-					renderer.renderPages(pages);
+		builder.registerTableLayouts(tableLayouts);
+		if (options.tableLayouts) {
+			builder.registerTableLayouts(options.tableLayouts);
+		}
 
-					resolve(this.pdfKitDoc);
-				} catch (e) {
-					reject(e);
-				}
-			}, result => {
-				reject(result);
-			});
+		let pages = builder.layoutDocument(docDefinition.content, this.pdfKitDoc, docDefinition.styles || {}, docDefinition.defaultStyle || { fontSize: 12, font: 'Roboto' }, docDefinition.background, docDefinition.header, docDefinition.footer, docDefinition.watermark, docDefinition.pageBreakBefore);
+		let maxNumberPages = docDefinition.maxPagesNumber || -1;
+		if (isNumber(maxNumberPages) && maxNumberPages > -1) {
+			pages = pages.slice(0, maxNumberPages);
+		}
+
+		// if pageSize.height is set to Infinity, calculate the actual height of the page that
+		// was laid out using the height of each of the items in the page.
+		pages.forEach(page => {
+			if (page.pageSize.height === Infinity) {
+				page.pageSize.height = calculatePageHeight(page, page.pageMargins);
+			}
 		});
+
+		const renderer = new Renderer(this.pdfKitDoc, options.progressCallback);
+		renderer.renderPages(pages);
+
+		return this.pdfKitDoc;
 	}
 
 	/**
 	 * @param {object} docDefinition
 	 * @returns {Promise}
 	 */
-	resolveUrls(docDefinition) {
+	async resolveUrls(docDefinition) {
 		const getExtendedUrl = url => {
 			if (typeof url === 'object') {
-				return { url: url.url, headers: url.headers };
+				return { url: url.url, headers: url.headers, cache: url.cache === undefined ? this.urlResourceCaching : url.cache === true };
 			}
 
-			return { url: url, headers: {} };
+			return { url: url, headers: {}, cache: this.urlResourceCaching };
 		};
 
-		return new Promise((resolve, reject) => {
-			if (this.urlResolver === null) {
-				resolve();
-			}
-
-			for (let font in this.fontDescriptors) {
-				if (this.fontDescriptors.hasOwnProperty(font)) {
-					if (this.fontDescriptors[font].normal) {
-						if (Array.isArray(this.fontDescriptors[font].normal)) { // TrueType Collection
-							let url = getExtendedUrl(this.fontDescriptors[font].normal[0]);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].normal[0] = url.url;
-						} else {
-							let url = getExtendedUrl(this.fontDescriptors[font].normal);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].normal = url.url;
-						}
+		for (let font in this.fontDescriptors) {
+			if (this.fontDescriptors.hasOwnProperty(font)) {
+				if (this.fontDescriptors[font].normal) {
+					if (Array.isArray(this.fontDescriptors[font].normal)) { // TrueType Collection
+						let url = getExtendedUrl(this.fontDescriptors[font].normal[0]);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
+					} else {
+						let url = getExtendedUrl(this.fontDescriptors[font].normal);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
 					}
-					if (this.fontDescriptors[font].bold) {
-						if (Array.isArray(this.fontDescriptors[font].bold)) { // TrueType Collection
-							let url = getExtendedUrl(this.fontDescriptors[font].bold[0]);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].bold[0] = url.url;
-						} else {
-							let url = getExtendedUrl(this.fontDescriptors[font].bold);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].bold = url.url;
-						}
+				}
+				if (this.fontDescriptors[font].bold) {
+					if (Array.isArray(this.fontDescriptors[font].bold)) { // TrueType Collection
+						let url = getExtendedUrl(this.fontDescriptors[font].bold[0]);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
+					} else {
+						let url = getExtendedUrl(this.fontDescriptors[font].bold);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
 					}
-					if (this.fontDescriptors[font].italics) {
-						if (Array.isArray(this.fontDescriptors[font].italics)) { // TrueType Collection
-							let url = getExtendedUrl(this.fontDescriptors[font].italics[0]);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].italics[0] = url.url;
-						} else {
-							let url = getExtendedUrl(this.fontDescriptors[font].italics);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].italics = url.url;
-						}
+				}
+				if (this.fontDescriptors[font].italics) {
+					if (Array.isArray(this.fontDescriptors[font].italics)) { // TrueType Collection
+						let url = getExtendedUrl(this.fontDescriptors[font].italics[0]);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
+					} else {
+						let url = getExtendedUrl(this.fontDescriptors[font].italics);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
 					}
-					if (this.fontDescriptors[font].bolditalics) {
-						if (Array.isArray(this.fontDescriptors[font].bolditalics)) { // TrueType Collection
-							let url = getExtendedUrl(this.fontDescriptors[font].bolditalics[0]);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].bolditalics[0] = url.url;
-						} else {
-							let url = getExtendedUrl(this.fontDescriptors[font].bolditalics);
-							this.urlResolver.resolve(url.url, url.headers);
-							this.fontDescriptors[font].bolditalics = url.url;
-						}
+				}
+				if (this.fontDescriptors[font].bolditalics) {
+					if (Array.isArray(this.fontDescriptors[font].bolditalics)) { // TrueType Collection
+						let url = getExtendedUrl(this.fontDescriptors[font].bolditalics[0]);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
+					} else {
+						let url = getExtendedUrl(this.fontDescriptors[font].bolditalics);
+						this.urlResolver.resolve(url.url, url.headers, url.cache);
 					}
 				}
 			}
+		}
 
-			if (docDefinition.images) {
-				for (let image in docDefinition.images) {
-					if (docDefinition.images.hasOwnProperty(image)) {
-						let url = getExtendedUrl(docDefinition.images[image]);
-						this.urlResolver.resolve(url.url, url.headers);
-						docDefinition.images[image] = url.url;
-					}
+		if (docDefinition.images) {
+			for (let image in docDefinition.images) {
+				if (docDefinition.images.hasOwnProperty(image)) {
+					let url = getExtendedUrl(docDefinition.images[image]);
+					this.urlResolver.resolve(url.url, url.headers, url.cache);
 				}
 			}
+		}
 
-			if (docDefinition.attachments) {
-				for (let attachment in docDefinition.attachments) {
-					if (docDefinition.attachments.hasOwnProperty(attachment) && docDefinition.attachments[attachment].src) {
-						let url = getExtendedUrl(docDefinition.attachments[attachment].src);
-						this.urlResolver.resolve(url.url, url.headers);
-						docDefinition.attachments[attachment].src = url.url;
-					}
+		if (docDefinition.attachments) {
+			for (let attachment in docDefinition.attachments) {
+				if (docDefinition.attachments.hasOwnProperty(attachment) && docDefinition.attachments[attachment].src) {
+					let url = getExtendedUrl(docDefinition.attachments[attachment].src);
+					this.urlResolver.resolve(url.url, url.headers, url.cache);
 				}
 			}
+		}
 
-			if (docDefinition.files) {
-				for (let file in docDefinition.files) {
-					if (docDefinition.files.hasOwnProperty(file) && docDefinition.files[file].src) {
-						let url = getExtendedUrl(docDefinition.files[file].src);
-						this.urlResolver.resolve(url.url, url.headers);
-						docDefinition.files[file].src = url.url;
-					}
+		if (docDefinition.files) {
+			for (let file in docDefinition.files) {
+				if (docDefinition.files.hasOwnProperty(file) && docDefinition.files[file].src) {
+					let url = getExtendedUrl(docDefinition.files[file].src);
+					this.urlResolver.resolve(url.url, url.headers, url.cache);
 				}
 			}
+		}
 
-			this.urlResolver.resolved().then(() => {
-				resolve();
-			}, result => {
-				reject(result);
-			});
-		});
+		await this.urlResolver.resolved();
 	}
 }
 
@@ -247,9 +224,13 @@ function createMetadata(docDefinition) {
 function embedFiles(docDefinition, pdfKitDoc) {
 	if (docDefinition.files) {
 		for (const key in docDefinition.files) {
-			const file = docDefinition.files[key];
+			const file = { ...docDefinition.files[key] };
 
 			if (!file.src) return;
+
+			if (typeof file.src === 'object' && file.src.url) {
+				file.src = file.src.url;
+			}
 
 			if (pdfKitDoc.virtualfs && pdfKitDoc.virtualfs.existsSync(file.src)) {
 				file.src = pdfKitDoc.virtualfs.readFileSync(file.src);
@@ -261,7 +242,7 @@ function embedFiles(docDefinition, pdfKitDoc) {
 	}
 }
 
-function calculatePageHeight(pages, margins) {
+function calculatePageHeight(page, margins) {
 	function getItemHeight(item) {
 		if (typeof item.item.getHeight === 'function') {
 			return item.item.getHeight();
@@ -288,13 +269,11 @@ function calculatePageHeight(pages, margins) {
 	let fixedMargins = normalizePageMargin(margins || 40);
 	let height = fixedMargins.top;
 
-	pages.forEach(page => {
-		page.items.forEach(item => {
-			let bottomPosition = getBottomPosition(item);
-			if (bottomPosition > height) {
-				height = bottomPosition;
-			}
-		});
+	page.items.forEach(item => {
+		let bottomPosition = getBottomPosition(item);
+		if (bottomPosition > height) {
+			height = bottomPosition;
+		}
 	});
 
 	height += fixedMargins.bottom;

@@ -16,6 +16,17 @@ pdfmake.addFonts(Times);
 //var ZapfDingbats = require('../standard-fonts/ZapfDingbats');
 //pdfmake.addFonts(ZapfDingbats);
 
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
+
 
 var docDefinition = {
 	content: [
@@ -30,7 +41,8 @@ var docDefinition = {
 	],
 	defaultStyle: {
 		font: 'Helvetica'
-	}
+	},
+	language: "en-AU"
 };
 
 var now = new Date();

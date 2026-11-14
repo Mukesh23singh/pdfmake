@@ -45,7 +45,7 @@ class TextInlines {
 	 * Converts an array of strings (or inline-definition-objects) into a collection
 	 * of inlines and calculated minWidth/maxWidth and their min/max widths
 	 *
-	 * @param {Array} textArray an array of inline-definition-objects (or strings)
+	 * @param {Array|object} textArray an array of inline-definition-objects (or strings)
 	 * @param {StyleContextStack} styleContextStack current style stack
 	 * @returns {object} collection of inlines, minWidth, maxWidth
 	 */
@@ -61,9 +61,9 @@ class TextInlines {
 		let flattenedTextArray = flattenTextArray(textArray);
 
 		const textBreaker = new TextBreaker();
-		let breakedText = textBreaker.getBreaks(flattenedTextArray, styleContextStack);
+		let brokenText = textBreaker.getBreaks(flattenedTextArray, styleContextStack);
 
-		let measuredText = this.measure(breakedText, styleContextStack);
+		let measuredText = this.measure(brokenText, styleContextStack);
 
 		measuredText.forEach(inline => {
 			minWidth = Math.max(minWidth, getTrimmedWidth(inline));
@@ -117,6 +117,7 @@ class TextInlines {
 			item.decoration = StyleContextStack.getStyleProperty(item, styleContextStack, 'decoration', null);
 			item.decorationColor = StyleContextStack.getStyleProperty(item, styleContextStack, 'decorationColor', null);
 			item.decorationStyle = StyleContextStack.getStyleProperty(item, styleContextStack, 'decorationStyle', null);
+			item.decorationThickness = StyleContextStack.getStyleProperty(item, styleContextStack, 'decorationThickness', null);
 			item.background = StyleContextStack.getStyleProperty(item, styleContextStack, 'background', null);
 			item.link = StyleContextStack.getStyleProperty(item, styleContextStack, 'link', null);
 			item.linkToPage = StyleContextStack.getStyleProperty(item, styleContextStack, 'linkToPage', null);

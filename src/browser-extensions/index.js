@@ -1,12 +1,12 @@
 import pdfmakeBase from '../base';
 import OutputDocumentBrowser from './OutputDocumentBrowser';
-import URLBrowserResolver from './URLBrowserResolver';
 import fs from 'fs';
 import configurator from 'core-js/configurator';
+import { registerStdFonts } from 'pdfkit';
 
 // core-js: Polyfills will be used only if natives completely unavailable.
 configurator({
-  useNative: ['Promise']
+	useNative: ['Promise']
 });
 
 let defaultClientFonts = {
@@ -21,12 +21,16 @@ let defaultClientFonts = {
 class pdfmake extends pdfmakeBase {
 	constructor() {
 		super();
-		this.urlResolver = new URLBrowserResolver(this.virtualfs);
 		this.fonts = defaultClientFonts;
 	}
 
 	addFontContainer(fontContainer) {
-		this.addVirtualFileSystem(fontContainer.vfs);
+		if (fontContainer.standardFonts) {
+			registerStdFonts(...fontContainer.standardFonts);
+		}
+		if (fontContainer.vfs) {
+			this.addVirtualFileSystem(fontContainer.vfs);
+		}
 		this.addFonts(fontContainer.fonts);
 	}
 

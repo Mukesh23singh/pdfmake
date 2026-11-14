@@ -660,7 +660,7 @@ describe('LayoutBuilder', function () {
 			assert.equal(pages[0].items[0].item.y + pages[0].items[0].item.getHeight(), pages[0].items[1].item.y);
 		});
 
-		it('stack of paragraphs should inherit styles and overriden properties from column descriptors', function () {
+		it('stack of paragraphs should inherit styles and overridden properties from column descriptors', function () {
 			var desc = [
 				{
 					style: 'header',
@@ -973,7 +973,7 @@ describe('LayoutBuilder', function () {
 			}
 		});
 
-		it('numbers in ordered sublist should have indepentend counters', function () {
+		it('numbers in ordered sublist should have independent counters', function () {
 			var desc = [
 				{
 					ol: [
@@ -1312,6 +1312,32 @@ describe('LayoutBuilder', function () {
 			assert.equal(pages[0].items[1].item.y, 0);
 		});
 
+		[1, 2].forEach(function (pageBreakCount) {
+			it('should preserve absolute polyline points after ' + pageBreakCount + ' layout retries', function () {
+				var desc = [{ text: 'First page' }];
+				for (var i = 0; i < pageBreakCount; i++) {
+					desc.push({ text: 'Next page', id: 'break' + i });
+				}
+				desc.push({
+					absolutePosition: { x: 40, y: 250 },
+					canvas: [{
+						type: 'polyline',
+						closePath: true,
+						points: [{ x: 0, y: 0 }, { x: 26, y: 26 }, { x: 18, y: 8 }]
+					}]
+				});
+
+				var pages = builder.layoutDocument(desc, sampleTestProvider, {}, undefined, undefined, undefined, undefined, undefined, function (node) {
+					return typeof node.id === 'string' && node.id.indexOf('break') === 0;
+				});
+
+				assert.equal(pages.length, pageBreakCount + 1);
+				var vectors = pages[pageBreakCount].items.filter(item => item.type === 'vector');
+				assert.equal(vectors.length, 1);
+				assert.deepStrictEqual(vectors[0].item.points, [{ x: 40, y: 250 }, { x: 66, y: 276 }, { x: 58, y: 258 }]);
+			});
+		});
+
 		it('should use the absolutePosition attribute without pagebreak in canvas', function () {
 			var builderAP = new LayoutBuilder({ width: 841.89, height: 555.28, orientation: 'portrait' }, { left: 40, right: 40, top: 40, bottom: 40 });
 			builderAP.pages = [];
@@ -1564,68 +1590,230 @@ describe('LayoutBuilder', function () {
 			assert.equal(pages[0].items[1].item.inlines[1].text, 'line.');
 		});
 
-		it('should support images');
-		it('should align image properly');
-		it('should break pages if image cannot fit on current page');
-		it('should move images drawn inside unbreakable blocks properly to the next page');
-		it('should copy image if it\'s inside a repeatable block (ie. table header)');
-
-		describe.skip('TODO', function () {
-			//DONE
-			it.skip('should support block margins');
-			it.skip('should support column spans');
-			it.skip('should support row spans');
-
-			it.skip('should support vector lines');
-			it.skip('should support vector paths');
-			it.skip('should support vector dashed lines');
-			it.skip('should support vector line join styles');
-			it.skip('should support vector rectangles');
-			it.skip('should support vector rounded rectangles');
-			it.skip('should support vector polygons');
-			it.skip('should support vector winding rules');
-			it.skip('should support colors');
-
-			it.skip('should support table styling');
-			it.skip('should support subtables');
-
-			it.skip('should support page headers');
-			it.skip('should support page footers');
-			it.skip('should support current page number');
-			it.skip('should support images');
-			it.skip('should support image scaling');
-			it.skip('should support various page sizes');
-
-			// DOING
-
-			// TODO
-			it.skip('should support subtable headers');
-			it.skip('should support tables with percentage column widths');
-
-			it.skip('should support inline margins');
-			it.skip('should support padding');
-			it.skip('should support border styling');
-			it.skip('should support subscript');
-			it.skip('should support superscript');
-			it.skip('should support vertical alignment inside cells');
-			it.skip('should support programmatic cell styling');
-			it.skip('should support non-breaking-spaces');
-			it.skip('should support non-breaking-lines');
-			it.skip('should support page count');
-
-			it.skip('should support clipping');
-			it.skip('should support absolute positioning');
-			it.skip('should support text continuations');
-			it.skip('should support line-height');
-			it.skip('should support programmatic styling');
-			it.skip('should support line filling action');
-			it.skip('should render lines to pdf in a single call if style is the same');
-			it.skip('should support document encryption');
-			it.skip('should support document permissions');
-			it.skip('should support in-document-references');
-			it.skip('should support uppercase text transforms');
-			it.skip('should support lowercase text transforms');
+		it('should support images', function () {
+			var pages = builder.layoutDocument([{ image: 'sample.jpg', width: 80 }, { text: 'after' }], sampleTestProvider);
+			var image = pages[0].items[0];
+			assert.equal(image.type, 'image');
+			assert.equal(image.item.image, 'sample.jpg');
+			assert.equal(image.item.x, 40);
+			assert.equal(image.item.y, 40);
+			assert.equal(image.item._width, 80);
+			assert.equal(image.item._height, 80);
+			assert.equal(pages[0].items[1].item.y, 120);
 		});
+
+		['left', 'center', 'right'].forEach(function (alignment, index) {
+			it('should align images to the ' + alignment, function () {
+				var pages = builder.layoutDocument([{ image: 'sample.jpg', width: 80, alignment: alignment }], sampleTestProvider);
+				assert.equal(pages[0].items[0].item.x, 40 + index * 120);
+			});
+		});
+
+		it('should break pages if image cannot fit on current page', function () {
+			var pages = builder.layoutDocument([
+				{ image: 'first.jpg', width: 80, height: 650 },
+				{ image: 'second.jpg', width: 80, height: 100 }
+			], sampleTestProvider);
+			assert.equal(pages.length, 2);
+			assert.equal(pages[0].items.length, 1);
+			assert.equal(pages[1].items.length, 1);
+			assert.equal(pages[1].items[0].item.image, 'second.jpg');
+			assert.equal(pages[1].items[0].item.y, 40);
+		});
+
+		it('should move images drawn inside unbreakable blocks properly to the next page', function () {
+			var pages = builder.layoutDocument([
+				{ image: 'first.jpg', width: 80, height: 650 },
+				{ unbreakable: true, stack: [{ text: 'caption' }, { image: 'second.jpg', width: 80, height: 100 }] }
+			], sampleTestProvider);
+			assert.equal(pages.length, 2);
+			assert.equal(pages[0].items.length, 1);
+			assert.equal(pages[1].items.length, 2);
+			assert.equal(pages[1].items[0].item.y, 40);
+			assert.equal(pages[1].items[1].item.image, 'second.jpg');
+			assert.equal(pages[1].items[1].item.x, 40);
+			assert.equal(pages[1].items[1].item.y, 52);
+		});
+
+		it('should copy images inside repeated table headers', function () {
+			var body = [[{ image: 'header.jpg', width: 20 }]];
+			for (var i = 0; i < 80; i++) body.push([{ text: 'row ' + i }]);
+			var pages = builder.layoutDocument([{ table: { headerRows: 1, widths: [100], body: body }, layout: emptyTableLayout }], sampleTestProvider);
+			assert(pages.length > 1);
+			pages.forEach(function (page) {
+				var images = page.items.filter(item => item.type === 'image');
+				assert.equal(images.length, 1);
+				assert.equal(images[0].item.image, 'header.jpg');
+				assert.equal(images[0].item.y, 40);
+				assert.equal(images[0].item._width, 20);
+			});
+		});
+
+		it('should support table styling', function () {
+			var pages = builder.layoutDocument([{
+				style: 'table', table: { widths: [100], body: [['cell']] }, layout: emptyTableLayout
+			}], sampleTestProvider, { table: { color: 'red', fontSize: 20 } });
+			var inline = pages[0].items[0].item.inlines[0];
+			assert.equal(inline.color, 'red');
+			assert.equal(inline.fontSize, 20);
+		});
+
+		it('should support subtables with repeated headers', function () {
+			var body = [['nested header']];
+			for (var i = 0; i < 80; i++) body.push(['row ' + i]);
+			var nested = { table: { headerRows: 1, widths: [200], body: body }, layout: emptyTableLayout };
+			var pages = builder.layoutDocument([{
+				table: { widths: [240], body: [[nested]] }, layout: emptyTableLayout
+			}], sampleTestProvider);
+			assert(pages.length > 1);
+			pages.forEach(function (page) {
+				var firstLine = page.items.find(item => item.type === 'line');
+				assert.equal(firstLine.item.inlines.map(inline => inline.text).join(''), 'nested header');
+				assert.equal(firstLine.item.y, 40);
+			});
+			var rows = pages.flatMap(page => page.items).filter(item => item.type === 'line')
+				.map(item => item.item.inlines.map(inline => inline.text).join('')).filter(text => text !== 'nested header');
+			assert.deepEqual(rows, body.slice(1).map(row => row[0].text));
+		});
+
+		['header', 'footer'].forEach(function (type) {
+			it('should render a dynamic ' + type + ' with page numbers and page count on every page', function () {
+				var callback = sinon.spy(function (currentPage, pageCount) {
+					return { text: type + ' ' + currentPage + '/' + pageCount, fontSize: 10 };
+				});
+				var pages = builder.layoutDocument([
+					{ text: 'first' }, { text: 'second', pageBreak: 'before' }
+				], sampleTestProvider, {}, {}, undefined, type === 'header' ? callback : undefined, type === 'footer' ? callback : undefined);
+				assert.equal(callback.callCount, 2);
+				pages.forEach(function (page, index) {
+					var line = page.items.find(item => item.type === 'line' && item.item.inlines.map(inline => inline.text).join('') === type + ' ' + (index + 1) + '/2');
+					assert(line);
+					assert.equal(line.item.y, type === 'header' ? 0 : 760);
+				});
+			});
+		});
+
+		[{ width: 300, height: 500 }, { width: 600, height: 400 }].forEach(function (size) {
+			it('should lay out content within page size ' + size.width + 'x' + size.height, function () {
+				var sizedBuilder = new LayoutBuilder(size, { left: 40, right: 40, top: 40, bottom: 40 });
+				var pages = sizedBuilder.layoutDocument([{ text: 'a\n'.repeat(100) + 'end' }], sampleTestProvider);
+				assert(pages.length > 1);
+				pages.forEach(function (page) {
+					assert.equal(page.pageSize.width, size.width);
+					assert.equal(page.pageSize.height, size.height);
+					page.items.forEach(function (item) {
+						assert(item.item.y >= 40);
+						assert(item.item.y + item.item.getHeight() <= size.height - 40);
+					});
+				});
+			});
+		});
+
+		it('should support tables with percentage column widths', function () {
+			var node = { table: { widths: ['25%', '75%'], body: [['a', 'b']] }, layout: emptyTableLayout };
+			var pages = builder.layoutDocument([node], sampleTestProvider);
+			assert.equal(node.table.widths[0]._calcWidth, 80);
+			assert.equal(node.table.widths[1]._calcWidth, 240);
+			assert.equal(pages[0].items[1].item.x, 120);
+		});
+
+		it('should support table cell padding', function () {
+			var pages = builder.layoutDocument([{
+				table: { widths: [100], body: [['cell']] },
+				layout: Object.assign({}, emptyTableLayout, {
+					paddingLeft: () => 7, paddingRight: () => 9,
+					paddingTop: () => 11, paddingBottom: () => 13
+				})
+			}, { text: 'after' }], sampleTestProvider);
+			assert.equal(pages[0].items[0].item.x, 47);
+			assert.equal(pages[0].items[0].item.y, 51);
+			assert.equal(pages[0].items[1].item.y, 40 + 11 + 12 + 13);
+		});
+
+		it('should support programmatic table borders and cell fills', function () {
+			var pages = builder.layoutDocument([{
+				table: { widths: [100], body: [['first'], ['second']] },
+				layout: {
+					hLineWidth: () => 2, vLineWidth: () => 3,
+					hLineColor: () => 'red', vLineColor: () => 'blue',
+					fillColor: row => row === 0 ? 'yellow' : 'green'
+				}
+			}], sampleTestProvider);
+			var vectors = pages[0].items.filter(item => item.type === 'vector').map(item => item.item);
+			assert(vectors.some(vector => vector.type === 'line' && vector.lineWidth === 2 && vector.lineColor === 'red'));
+			assert(vectors.some(vector => vector.type === 'line' && vector.lineWidth === 3 && vector.lineColor === 'blue'));
+			assert(vectors.some(vector => vector.type === 'rect' && vector.color === 'yellow'));
+			assert(vectors.some(vector => vector.type === 'rect' && vector.color === 'green'));
+		});
+
+		it('should support vertical alignment inside table cells', function () {
+			var pages = builder.layoutDocument([{
+				table: { widths: [100, 100], body: [[{ text: 'short', verticalAlignment: 'middle' }, 'a\nb\nc']] },
+				layout: emptyTableLayout
+			}], sampleTestProvider);
+			var begin = pages[0].items.find(item => item.type === 'beginVerticalAlignment');
+			var end = pages[0].items.find(item => item.type === 'endVerticalAlignment');
+			assert.equal(begin.item.verticalAlignment, 'middle');
+			assert.equal(end.item.verticalAlignment, 'middle');
+			assert.equal(begin.item.getNodeHeight(), 12);
+			assert.equal(begin.item.getViewHeight(), 36);
+		});
+
+		it('should keep words joined by non-breaking spaces on the same line', function () {
+			var pages = builder.layoutDocument([{ text: 'prefix prefix prefix x aa\u00a0bb' }], sampleTestProvider);
+			var lines = pages[0].items.map(item => item.item.inlines.map(inline => inline.text).join(''));
+			assert.equal(lines.length, 2);
+			assert.equal(lines[1], 'aa\u00a0bb');
+		});
+
+		it('should keep noWrap text together when it does not fit the remaining line width', function () {
+			var pages = builder.layoutDocument([{ text: [
+				{ text: 'prefix prefix prefix ' }, { text: 'aa bb cc', noWrap: true }
+			] }], sampleTestProvider);
+			assert.equal(pages[0].items.length, 2);
+			assert.equal(pages[0].items[1].item.inlines[0].text, 'aa bb cc');
+		});
+
+		it('should keep adjacent noWrap inlines together even when the second starts with a space', function () {
+			var pages = builder.layoutDocument([{ text: [
+				{ text: 'prefix ' }, { text: 'First line', noWrap: true }, { text: ' Second line', noWrap: true }
+			] }], sampleTestProvider);
+			assert.equal(pages[0].items.length, 2);
+			assert.deepEqual(pages[0].items[1].item.inlines.map(inline => inline.text), ['First line', ' Second line']);
+		});
+
+		it('should continue inline text across pages without losing content', function () {
+			var texts = Array.from({ length: 100 }, (_, index) => 'line ' + index);
+			var pages = builder.layoutDocument([{ text: texts.map((text, index) => ({ text: text + (index < 99 ? '\n' : ''), color: index % 2 ? 'red' : 'blue' })) }], sampleTestProvider);
+			assert(pages.length > 1);
+			var lines = pages.flatMap(page => page.items).map(item => item.item.inlines.map(inline => inline.text).join(''));
+			assert.deepEqual(lines, texts);
+		});
+
+		it('should support line-height', function () {
+			var pages = builder.layoutDocument([{ text: 'first\nsecond', fontSize: 10, lineHeight: 2 }, { text: 'after' }], sampleTestProvider);
+			assert.deepEqual(pages[0].items.map(item => item.item.y), [40, 60, 80]);
+		});
+
+		it('should support programmatically generated styles', function () {
+			var pages = builder.layoutDocument([0, 1].map(index => ({ text: 'text', color: index % 2 ? 'red' : 'blue', fontSize: 10 + index })), sampleTestProvider);
+			assert.deepEqual(pages[0].items.map(item => item.item.inlines[0].color), ['blue', 'red']);
+			assert.deepEqual(pages[0].items.map(item => item.item.inlines[0].fontSize), [10, 11]);
+		});
+
+		// describe('features requiring implementation', function () {
+		// 	// Renderer.renderVector does not accept a winding-rule option.
+		// 	it.skip('should support vector winding rules');
+		// 	// Margins currently apply to blocks, not individual text inlines.
+		// 	it.skip('should support inline margins');
+		// 	// No document-definition API exists for a line-filling callback.
+		// 	it.skip('should support line filling action');
+		// 	// Renderer.renderLine still writes each inline separately (see its TODO).
+		// 	it.skip('should render lines to pdf in a single call if style is the same');
+		// 	// Text transforms are not implemented by TextInlines or Renderer.
+		// 	it.skip('should support uppercase text transforms');
+		// 	it.skip('should support lowercase text transforms');
+		// });
 	});
 
 	describe('processRow', function () {
@@ -1672,39 +1860,81 @@ describe('LayoutBuilder', function () {
 			var pageMargins = { left: 40, top: 40, bottom: 40, right: 40 };
 
 			builder2 = new LayoutBuilder(pageSize, pageMargins, {});
-			builder2.writer = new PageElementWriter(new DocumentContext(pageSize, pageMargins, true));
+			var ctx = new DocumentContext();
+			ctx.addPage(pageSize, pageMargins);
+			builder2.writer = new PageElementWriter(ctx);
 			builder2.linearNodeList = [];
 		});
 
 		it('should return an empty array if no page breaks occur', function () {
 			var doc = createTable(1, 0);
 
-			var result = builder2.processRow(doc.table.body[0], doc.table.widths, doc._offsets.offsets, doc.table.body, 0);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
 
 			assert(result.pageBreaks instanceof Array);
 			assert.equal(result.pageBreaks.length, 0);
 		});
 
 		it('on page break should return an entry with ending/starting positions', function () {
+			var doc = createTable(0, 1, 10, 5, 5);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
+			assert(result.pageBreaks instanceof Array);
+			assert.equal(result.pageBreaks.length, 1);
+			assert.equal(result.pageBreaks[0].prevPage, 0);
+			assert.equal(result.pageBreaks[0].prevY, 40 + 12 * 6);
+		});
+
+		it('on page break should return an entry with ending/starting positions 2', function () {
 			var doc = createTable(0, 1, 10, 5);
-			var result = builder2.processRow(doc.table.body[0], doc.table.widths, doc._offsets.offsets, doc.table.body, 0);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
 
 			assert(result.pageBreaks instanceof Array);
 			assert.equal(result.pageBreaks.length, 1);
 			assert.equal(result.pageBreaks[0].prevPage, 0);
+
 			assert.equal(result.pageBreaks[0].prevY, 40 + 12 * 5);
 		});
 
 		it('on multi-pass page break (columns or table columns) should treat bottom-most page-break as the ending position ', function () {
 			var doc = createTable(0, 1, 10, 5, 7);
-			var result = builder2.processRow(doc.table.body[0], doc.table.widths, doc._offsets.offsets, doc.table.body, 0);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
 
 			assert.equal(result.pageBreaks[0].prevY, 40 + 12 * 7);
 		});
 
 		it('on multiple page breaks (more than 2 pages), should return all entries with ending/starting positions', function () {
-			var doc = createTable(0, 1, 100, 90);
-			var result = builder2.processRow(doc.table.body[0], doc.table.widths, doc._offsets.offsets, doc.table.body, 0);
+			var doc = createTable(0, 1, 100, 90, 90);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
 
 			assert(result.pageBreaks instanceof Array);
 			assert.equal(result.pageBreaks.length, 2);
@@ -1714,9 +1944,33 @@ describe('LayoutBuilder', function () {
 			assert.equal(result.pageBreaks[1].prevY, 40 + (90 - 60) * 12);
 		});
 
+		it('on multiple page breaks (more than 2 pages), should return all entries with ending/starting positions 2', function () {
+			var doc = createTable(0, 1, 100, 90, 90);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
+
+			assert(result.pageBreaks instanceof Array);
+			assert.equal(result.pageBreaks.length, 2);
+			assert.equal(result.pageBreaks[0].prevPage, 0);
+			assert.equal(result.pageBreaks[0].prevY, 40 + 60 * 12);
+			assert.equal(result.pageBreaks[1].prevPage, 1);
+			assert.equal(result.pageBreaks[1].prevY, 40 + 30 * 12);
+		});
+
 		it('on multiple and multi-pass page breaks should calculate bottom-most endings for every page', function () {
 			var doc = createTable(0, 1, 100, 90, 92);
-			var result = builder2.processRow(doc.table.body[0], doc.table.widths, doc._offsets.offsets, doc.table.body, 0);
+			var result = builder2.processRow({
+				cells: doc.table.body[0],
+				widths: doc.table.widths,
+				gaps: doc._offsets.offsets,
+				tableBody: doc.table.body,
+				rowIndex: 0
+			});
 
 			assert(result.pageBreaks instanceof Array);
 			assert.equal(result.pageBreaks.length, 2);
@@ -1727,8 +1981,11 @@ describe('LayoutBuilder', function () {
 		});
 	});
 
+
+
+
 	describe('dynamic header/footer', function () {
-		var docStructure, pdfDocument, styleDictionary, defaultStyle, background, header, footer, watermark, pageBreakBeforeFunction;
+		var docStructure, pdfDocument, styleDictionary, defaultStyle = undefined, background = undefined, header = undefined, footer = undefined, watermark = undefined, pageBreakBeforeFunction = undefined;
 
 		beforeEach(function () {
 			pdfDocument = sampleTestProvider;
@@ -1755,7 +2012,7 @@ describe('LayoutBuilder', function () {
 	});
 
 	describe('dynamic background', function () {
-		var docStructure, pdfDocument, styleDictionary, defaultStyle, background, header, footer, watermark, pageBreakBeforeFunction;
+		var docStructure, pdfDocument, styleDictionary, defaultStyle = undefined, background = undefined, header = undefined, footer = undefined, watermark = undefined, pageBreakBeforeFunction = undefined;
 
 		beforeEach(function () {
 			pdfDocument = sampleTestProvider;
@@ -1776,12 +2033,169 @@ describe('LayoutBuilder', function () {
 
 	describe('dynamic page break control', function () {
 
-		var docStructure, pdfDocument, styleDictionary, defaultStyle, background, header, footer, watermark, pageBreakBeforeFunction;
+		var docStructure, pdfDocument, styleDictionary, defaultStyle = undefined, background = undefined, header = undefined, footer = undefined, watermark = undefined, pageBreakBeforeFunction = undefined;
 
 
 		beforeEach(function () {
 			pdfDocument = sampleTestProvider;
 			styleDictionary = {};
+		});
+
+		['text', 'canvas', 'image'].forEach(function (type) {
+			[false, true].forEach(function (dontBreakRows) {
+				it('should report committed positions for ' + type + ' in ' + (dontBreakRows ? 'unbreakable rows' : 'an unbreakable table') + ' (#2130)', function () {
+					var cell = { id: 'cell' };
+					if (type === 'text') {
+						cell.text = 'First\nSecond\nThird';
+					} else if (type === 'canvas') {
+						cell.canvas = [{ type: 'rect', x: 0, y: 0, w: 20, h: 36 }];
+					} else {
+						cell.image = 'test.jpg';
+						cell.width = 20;
+						cell.height = 36;
+					}
+					var table = {
+						id: 'table',
+						unbreakable: !dontBreakRows,
+						layout: emptyTableLayout,
+						table: { dontBreakRows: dontBreakRows, body: [[cell]] }
+					};
+					var callback = sinon.spy(function () { return false; });
+					var pages = builder.layoutDocument([
+						{ text: 'Filler', margin: [0, 680, 0, 0] },
+						{ text: 'Heading', id: 'heading' },
+						table
+					], sampleTestProvider, {}, undefined, undefined, undefined, undefined, undefined, callback);
+
+					assert.equal(pages.length, 2);
+					var headingCall = callback.getCalls().find(call => call.args[0].id === 'heading');
+					assert.deepEqual(headingCall.args[1].getFollowingNodesOnPage(), []);
+					assert.deepEqual(headingCall.args[1].getNodesOnNextPage().map(node => node.id), ['table', 'cell']);
+					assert.deepEqual(cell.nodeInfo.pageNumbers, [2]);
+					assert.deepEqual(table.nodeInfo.pageNumbers, [2]);
+					cell.positions.forEach((position, index) => {
+						assert.equal(position.pageNumber, 2);
+						assert.equal(position.left, 40);
+						assert.equal(position.top, 40 + (type === 'text' ? index * 12 : 0));
+						assert.equal(position.pageInnerHeight, 720);
+						assert.equal(position.verticalRatio, (position.top - 40) / 720);
+					});
+				});
+			});
+		});
+
+		it('should keep an orphan heading with a multiline unbreakable table (#2130)', function () {
+			var heading = { text: 'Heading', headlineLevel: 1 };
+			var table = {
+				unbreakable: true,
+				table: { body: Array.from({ length: 3 }, () => [{ text: 'First\nSecond\nThird' }]) }
+			};
+			var pages = builder.layoutDocument([
+				{ text: 'Filler', margin: [0, 680, 0, 0] }, heading, table
+			], sampleTestProvider, {}, undefined, undefined, undefined, undefined, undefined,
+			(node, container) => node.headlineLevel === 1 && container.getFollowingNodesOnPage().length <= 2);
+
+			assert.equal(pages.length, 2);
+			assert.equal(heading.positions[0].pageNumber, 2);
+			assert.equal(heading.positions[0].top, 40);
+			assert(table.positions.every(position => position.pageNumber === 2));
+		});
+
+		['header', 'footer'].forEach(function (type) {
+			it('should reset reused ' + type + ' canvas positions when content is laid out again', function () {
+				var firstPageNode = { stack: ['Heading', { canvas: [{ type: 'rect', x: 0, y: 0, w: 10, h: 10 }] }] };
+				var repeatable = function (pageNumber) {
+					return pageNumber === 1 ? firstPageNode : { text: 'Other page' };
+				};
+				var pages = builder.layoutDocument(
+					[{ text: 'First' }, { text: 'Second', id: 'second' }],
+					sampleTestProvider, {}, undefined, undefined,
+					type === 'header' ? repeatable : undefined,
+					type === 'footer' ? repeatable : undefined,
+					undefined, node => node.id === 'second'
+				);
+
+				assert.equal(pages.length, 2);
+				var vector = pages[0].items.find(item => item.type === 'vector');
+				assert.equal(vector.item.y, (type === 'header' ? 0 : 760) + 12);
+			});
+
+			it('should not apply pageBreakBefore to dynamic ' + type + ' nodes (issue #1095)', function () {
+				var repeatableCalls = 0;
+				var repeatable = function () {
+					assert(++repeatableCalls <= 5, 'Page layout keeps recreating the ' + type);
+					return { stack: [{ text: 'Page number', id: 'page-number' }] };
+				};
+				var pageBreakBefore = sinon.spy(function (node) {
+					return node.startPosition.top >= 730;
+				});
+				var pages = builder.layoutDocument(
+					[{ text: 'Text', id: 'content', margin: [0, 680, 0, 0] }],
+					sampleTestProvider, {}, undefined, undefined,
+					type === 'header' ? repeatable : undefined,
+					type === 'footer' ? repeatable : undefined,
+					undefined, pageBreakBefore
+				);
+
+				assert.equal(pages.length, 1);
+				assert.equal(repeatableCalls, 1);
+				assert.deepEqual(pageBreakBefore.getCalls().map(call => call.args[0].id), [undefined, 'content']);
+				assert.deepEqual(pageBreakBefore.getCall(1).args[1].getFollowingNodesOnPage(), []);
+				var lines = pages[0].items.filter(item => item.type === 'line');
+				assert.equal(lines.length, 2);
+				assert.equal(lines[1].item.inlines.map(inline => inline.text).join(''), 'Page number');
+				assert.equal(lines[1].item.y, type === 'header' ? 0 : 760);
+			});
+		});
+
+		[false, true].forEach(function (useSection) {
+			it('should expose only content in surrounding node lists' + (useSection ? ' with section headers and footers' : ''), function () {
+				var content = {
+					id: 'body',
+					stack: [
+						{ text: 'First page', id: 'first' },
+						{ text: 'Second page', id: 'second', pageBreak: 'before' },
+						{ text: 'Third page', id: 'third', pageBreak: 'before' }
+					]
+				};
+				var pageHeader = { text: 'Header', id: 'page-header' };
+				var pageFooter = { text: 'Footer', id: 'page-footer' };
+				var callback = sinon.spy(function (node, container) {
+					var surrounding = container.getFollowingNodesOnPage().concat(container.getPreviousNodesOnPage(), container.getNodesOnNextPage());
+					assert(surrounding.every(item => item.id !== 'page-header' && item.id !== 'page-footer'));
+					if (node.id === 'first') {
+						assert.deepEqual(container.getFollowingNodesOnPage(), []);
+						assert.deepEqual(container.getNodesOnNextPage().map(item => item.id), ['second']);
+					}
+					return false;
+				});
+				var structure = useSection ? [{ section: content, header: pageHeader, footer: pageFooter }] : content;
+				var pages = builder.layoutDocument(structure, sampleTestProvider, {}, undefined, undefined,
+					() => JSON.parse(JSON.stringify(pageHeader)), () => JSON.parse(JSON.stringify(pageFooter)), undefined, callback);
+
+				assert.equal(pages.length, 3);
+				assert.deepEqual(callback.getCalls().map(call => call.args[0].id), ['body', 'first']);
+				pages.forEach(page => {
+					var lines = page.items.filter(item => item.type === 'line');
+					assert.deepEqual(lines.slice(-2).map(line => line.item.inlines[0].text), ['Header', 'Footer']);
+				});
+			});
+		});
+
+		it('should move an orphan heading to the next page even when a footer follows it', function () {
+			var content = [
+				{ text: Array(59).fill('Filler').join('\n') },
+				{ text: 'Heading', id: 'heading', headlineLevel: 1 },
+				{ text: 'Paragraph', id: 'paragraph' }
+			];
+			var pages = builder.layoutDocument(content, sampleTestProvider, {}, undefined, undefined, undefined,
+				() => ({ text: 'Footer' }), undefined,
+				(node, container) => node.headlineLevel === 1 && container.getFollowingNodesOnPage().length === 0);
+
+			assert.equal(pages.length, 2);
+			assert.equal(content[1].positions[0].pageNumber, 2);
+			assert.equal(content[2].positions[0].pageNumber, 2);
+			assert.equal(content[1].positions[0].top, 40);
 		});
 
 		it('should create a pageBreak before', function () {

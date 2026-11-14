@@ -16,6 +16,18 @@ pdfmake.addFonts({
 });
 */
 
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
+
+
 var docDefinition = {
 	content: [
 		'First paragraph',

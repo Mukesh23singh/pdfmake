@@ -1,6 +1,6 @@
 import { isString } from './helpers/variableType';
 
-function buildColumnWidths(columns, availableWidth) {
+function buildColumnWidths(columns, availableWidth, offsetTotal = 0, tableNode) {
 	let autoColumns = [];
 	let autoMin = 0;
 	let autoMax = 0;
@@ -10,7 +10,7 @@ function buildColumnWidths(columns, availableWidth) {
 	let fixedColumns = [];
 	let initial_availableWidth = availableWidth;
 
-	columns.forEach(column => {
+	columns.forEach((column, colIndex) => {
 		if (isAutoColumn(column)) {
 			autoColumns.push(column);
 			autoMin += column._minWidth;
@@ -20,14 +20,35 @@ function buildColumnWidths(columns, availableWidth) {
 			starMaxMin = Math.max(starMaxMin, column._minWidth);
 			starMaxMax = Math.max(starMaxMax, column._maxWidth);
 		} else {
-			fixedColumns.push(column);
+			fixedColumns.push({ column, colIndex });
 		}
 	});
 
-	fixedColumns.forEach(col => {
+	fixedColumns.forEach(({ column: col, colIndex }) => {
 		// width specified as %
 		if (isString(col.width) && /\d+%/.test(col.width)) {
-			col.width = parseFloat(col.width) * initial_availableWidth / 100;
+			// In tables we have to take into consideration the reserved width for paddings and borders
+			let reservedWidth = 0;
+			if (tableNode) {
+				const paddingLeft = tableNode._layout.paddingLeft(colIndex, tableNode);
+				const paddingRight = tableNode._layout.paddingRight(colIndex, tableNode);
+				const borderLeft = tableNode._layout.vLineWidth(colIndex, tableNode);
+				const borderRight = tableNode._layout.vLineWidth(colIndex + 1, tableNode);
+				if (colIndex === 0) {
+					// first column assumes whole borderLeft and half of border right
+					reservedWidth = paddingLeft + paddingRight + borderLeft + (borderRight / 2);
+
+				} else if (colIndex === columns.length - 1) {
+					// last column assumes whole borderRight and half of border left
+					reservedWidth = paddingLeft + paddingRight + (borderLeft / 2) + borderRight;
+
+				} else {
+					// Columns in the middle assume half of each border
+					reservedWidth = paddingLeft + paddingRight + (borderLeft / 2) + (borderRight / 2);
+				}
+			}
+			const totalAvailableWidth = initial_availableWidth + offsetTotal;
+			col.width = (parseFloat(col.width) * totalAvailableWidth / 100) - reservedWidth;
 		}
 		if (col.width < (col._minWidth) && col.elasticWidth) {
 			col._calcWidth = col._minWidth;

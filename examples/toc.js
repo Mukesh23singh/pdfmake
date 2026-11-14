@@ -4,6 +4,17 @@ var pdfmake = require('../js/index'); // only during development, otherwise use 
 var Roboto = require('../fonts/Roboto');
 pdfmake.addFonts(Roboto);
 
+pdfmake.setUrlAccessPolicy((url) => {
+	// this can be used to restrict allowed domains
+	return url.startsWith('https://');
+});
+
+// eslint-disable-next-line no-unused-vars
+pdfmake.setLocalAccessPolicy((path) => {
+	// this can be used to restrict access to local file system
+	return true;
+});
+
 
 var docDefinition = {
 	content: [
@@ -16,7 +27,10 @@ var docDefinition = {
 				title: { text: 'INDEX', style: 'header' },
 				//textMargin: [0, 0, 0, 0],
 				//textStyle: {italics: true},
-				numberStyle: { bold: true }
+				numberStyle: { bold: true },
+				sortBy: 'page', // 'page' (default) or 'title'
+				//sortLocale: 'cs', // custom locale to sort
+				//outlines: true,
 			}
 		},
 		{
