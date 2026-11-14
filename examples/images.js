@@ -71,7 +71,7 @@ var docDefinition = {
 	],
 	images: {
 		bee: testImageDataUrl,
-		snow: 'https://picsum.photos/seed/picsum/200/300',
+		snow: 'https://picsum.dev/i/1398/200/300',
 	}
 };
 
